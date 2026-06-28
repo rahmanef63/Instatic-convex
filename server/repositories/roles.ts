@@ -1,13 +1,43 @@
-import { nanoid } from 'nanoid'
+/**
+ * Roles registry.
+ *
+ * The four built-in system roles (owner, admin, client, member) plus any
+ * operator-created custom roles. Roles carry a capability grant list; the admin
+ * UI manages them through the `roles.manage` capability.
+ *
+ * Convex port: this file is now a thin adapter over `convex/roles.ts` (see
+ * docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
+ * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
+ * so handlers keep calling these unchanged while the rest of the runtime is
+ * still on the SQL path; the bodies read/write through the shared `getConvex()`
+ * handle instead. It is dropped wholesale when `server/db/*` is retired (§7).
+ *
+ * Two concerns stay on the server side of the boundary, because they depend on
+ * server-only constants that cannot be bundled into Convex:
+ *  - capability normalization (`normalizeCapabilities` filters/sorts against
+ *    `CORE_CAPABILITIES`) is applied to every returned role here;
+ *  - the rank ordering (`compareRolesByRank` uses `SYSTEM_ROLES` order) is the
+ *    final sort of `listRoles`.
+ *  - `syncSystemRoles` builds its payload from the code-declared `SYSTEM_ROLES`
+ *    / `FORCE_SYNC_ROLE_IDS` and hands it to one atomic Convex mutation.
+ *
+ * Domain validity failures thrown inside the Convex mutations arrive as a
+ * `ConvexError` carrying `{ message, status }`; we re-raise them as the
+ * `RoleMutationError` the HTTP layer (`mutationErrorResponse`) already expects.
+ *
+ * @see convex/roles.ts            — the Convex query/mutation functions
+ * @see server/handlers/cms/roles.ts — the endpoints that consume this
+ */
+
+import { ConvexError } from 'convex/values'
 import type { DbClient } from '../db/client'
 import {
   FORCE_SYNC_ROLE_IDS,
   normalizeCapabilities,
-  OWNER_ROLE_ID,
   SYSTEM_ROLES,
   type CoreCapability,
 } from '../auth/capabilities'
-import type { RoleRow } from '../types'
+import { api, getConvex } from '../convex/client'
 
 interface Role {
   id: string
@@ -16,6 +46,19 @@ interface Role {
   description: string
   isSystem: boolean
   capabilities: CoreCapability[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** The camelCase role shape returned by `convex/roles.ts`, before the
+ *  server-side capability normalization this adapter applies. */
+interface ConvexRole {
+  id: string
+  slug: string
+  name: string
+  description: string
+  isSystem: boolean
+  capabilities: string[]
   createdAt: string
   updatedAt: string
 }
@@ -30,17 +73,27 @@ export class RoleMutationError extends Error {
   }
 }
 
-function rowToRole(row: RoleRow): Role {
+function toRole(role: ConvexRole): Role {
   return {
-    id: row.id,
-    slug: row.slug,
-    name: row.name,
-    description: row.description,
-    isSystem: Boolean(row.is_system),
-    capabilities: normalizeCapabilities(row.capabilities_json),
-    createdAt: new Date(row.created_at).toISOString(),
-    updatedAt: new Date(row.updated_at).toISOString(),
+    id: role.id,
+    slug: role.slug,
+    name: role.name,
+    description: role.description,
+    isSystem: role.isSystem,
+    capabilities: normalizeCapabilities(role.capabilities),
+    createdAt: role.createdAt,
+    updatedAt: role.updatedAt,
   }
+}
+
+/** Re-raise a Convex-thrown domain error as the typed `RoleMutationError` the
+ *  HTTP layer maps to a status code; pass anything else through untouched. */
+function rethrowRoleError(err: unknown): never {
+  if (err instanceof ConvexError) {
+    const data = err.data as { message?: string; status?: number }
+    throw new RoleMutationError(data?.message ?? 'Role mutation failed', data?.status ?? 400)
+  }
+  throw err
 }
 
 const SYSTEM_ROLE_RANK = new Map(SYSTEM_ROLES.map((role, index) => [role.id, index]))
@@ -54,56 +107,13 @@ function compareRolesByRank(a: Role, b: Role): number {
   return a.name.localeCompare(b.name)
 }
 
-function slugFromRoleName(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-}
-
-export async function listRoles(db: DbClient): Promise<Role[]> {
-  const { rows } = await db<RoleRow>`
-    select id, slug, name, description, is_system, capabilities_json, created_at, updated_at
-    from roles
-    order by is_system desc, name asc
-  `
-  return rows.map(rowToRole).sort(compareRolesByRank)
-}
-
-async function getRole(db: DbClient, roleId: string): Promise<Role | null> {
-  const { rows } = await db<RoleRow>`
-    select id, slug, name, description, is_system, capabilities_json, created_at, updated_at
-    from roles
-    where id = ${roleId}
-    limit 1
-  `
-  return rows[0] ? rowToRole(rows[0]) : null
-}
-
-async function getRoleBySlug(db: DbClient, slug: string): Promise<Role | null> {
-  const { rows } = await db<RoleRow>`
-    select id, slug, name, description, is_system, capabilities_json, created_at, updated_at
-    from roles
-    where slug = ${slug}
-    limit 1
-  `
-  return rows[0] ? rowToRole(rows[0]) : null
-}
-
-async function assertRoleSlugAvailable(
-  db: DbClient,
-  slug: string,
-  currentRoleId?: string,
-): Promise<void> {
-  const existing = await getRoleBySlug(db, slug)
-  if (existing && existing.id !== currentRoleId) {
-    throw new RoleMutationError('Role slug is already in use', 409)
-  }
+export async function listRoles(_db: DbClient): Promise<Role[]> {
+  const roles = await getConvex().query(api.roles.list, {})
+  return roles.map(toRole).sort(compareRolesByRank)
 }
 
 export async function createCustomRole(
-  db: DbClient,
+  _db: DbClient,
   input: {
     name: string
     slug?: string
@@ -111,20 +121,17 @@ export async function createCustomRole(
     capabilities: CoreCapability[]
   },
 ): Promise<Role> {
-  const name = input.name.trim()
-  if (!name) throw new RoleMutationError('Role name is required')
-
-  const slug = slugFromRoleName(input.slug || name)
-  if (!slug) throw new RoleMutationError('Role slug is required')
-  await assertRoleSlugAvailable(db, slug)
-
-  const id = nanoid()
-  const { rows } = await db<RoleRow>`
-    insert into roles (id, slug, name, description, is_system, capabilities_json)
-    values (${id}, ${slug}, ${name}, ${input.description.trim()}, ${false}, ${input.capabilities})
-    returning id, slug, name, description, is_system, capabilities_json, created_at, updated_at
-  `
-  return rowToRole(rows[0]!)
+  try {
+    const role = await getConvex().mutation(api.roles.createCustom, {
+      name: input.name,
+      slugInput: input.slug ?? null,
+      description: input.description,
+      capabilities: input.capabilities,
+    })
+    return toRole(role)
+  } catch (err) {
+    rethrowRoleError(err)
+  }
 }
 
 /**
@@ -133,12 +140,12 @@ export async function createCustomRole(
  *
  * Owner-role policy:
  *  - capabilities are managed by the system (synced from `CORE_CAPABILITIES`
- *    at boot via `syncOwnerRoleCapabilities`) and cannot be edited
+ *    at boot via `syncSystemRoles`) and cannot be edited
  *  - the row itself cannot be renamed or re-described — its presence is a
  *    structural invariant of the installation
  */
 export async function updateRole(
-  db: DbClient,
+  _db: DbClient,
   roleId: string,
   input: {
     name?: string
@@ -147,31 +154,18 @@ export async function updateRole(
     capabilities?: CoreCapability[]
   },
 ): Promise<Role | null> {
-  const current = await getRole(db, roleId)
-  if (!current) return null
-  if (current.id === OWNER_ROLE_ID) {
-    throw new RoleMutationError('The Owner role is locked and cannot be edited', 409)
+  try {
+    const role = await getConvex().mutation(api.roles.update, {
+      roleId,
+      name: input.name,
+      slug: input.slug,
+      description: input.description,
+      capabilities: input.capabilities,
+    })
+    return role ? toRole(role) : null
+  } catch (err) {
+    rethrowRoleError(err)
   }
-
-  const name = input.name === undefined ? current.name : input.name.trim()
-  if (!name) throw new RoleMutationError('Role name is required')
-  const slug = input.slug === undefined ? current.slug : slugFromRoleName(input.slug)
-  if (!slug) throw new RoleMutationError('Role slug is required')
-  await assertRoleSlugAvailable(db, slug, current.id)
-  const description = input.description === undefined ? current.description : input.description.trim()
-  const capabilities = input.capabilities ?? current.capabilities
-
-  const { rows } = await db<RoleRow>`
-    update roles
-    set slug = ${slug},
-        name = ${name},
-        description = ${description},
-        capabilities_json = ${capabilities},
-        updated_at = current_timestamp
-    where id = ${roleId}
-    returning id, slug, name, description, is_system, capabilities_json, created_at, updated_at
-  `
-  return rows[0] ? rowToRole(rows[0]) : null
 }
 
 /**
@@ -179,23 +173,13 @@ export async function updateRole(
  * are part of the installation's expected role registry. Use `updateRole`
  * to edit a non-owner system role's name/capabilities instead.
  */
-export async function deleteCustomRole(db: DbClient, roleId: string): Promise<Role | null> {
-  const current = await getRole(db, roleId)
-  if (!current) return null
-  if (current.isSystem) throw new RoleMutationError('System roles cannot be deleted', 409)
-
-  const { rows } = await db<{ count: number }>`
-    select count(*) as count
-    from users
-    where role_id = ${roleId}
-      and deleted_at is null
-  `
-  if (Number(rows[0]?.count ?? 0) > 0) {
-    throw new RoleMutationError('Cannot delete a role assigned to users', 409)
+export async function deleteCustomRole(_db: DbClient, roleId: string): Promise<Role | null> {
+  try {
+    const role = await getConvex().mutation(api.roles.deleteCustom, { roleId })
+    return role ? toRole(role) : null
+  } catch (err) {
+    rethrowRoleError(err)
   }
-
-  const result = await db`delete from roles where id = ${roleId}`
-  return result.rowCount > 0 ? current : null
 }
 
 /**
@@ -220,31 +204,17 @@ export async function deleteCustomRole(db: DbClient, roleId: string): Promise<Ro
  * code-level decision, not a runtime one. Operators who need a "limited
  * admin" persona should create a custom role.
  *
- * Called from `server/index.ts` after `runMigrations`.
+ * Called from `server/index.ts` at boot.
  */
-export async function syncSystemRoles(db: DbClient): Promise<void> {
-  for (const role of SYSTEM_ROLES) {
-    const forceSync = FORCE_SYNC_ROLE_IDS.includes(role.id)
-    if (forceSync) {
-      // Force-resync the row to whatever the code declares.
-      await db`
-        insert into roles (id, slug, name, description, is_system, capabilities_json)
-        values (${role.id}, ${role.slug}, ${role.name}, ${role.description}, ${true}, ${role.capabilities})
-        on conflict (id) do update
-        set slug = excluded.slug,
-            name = excluded.name,
-            description = excluded.description,
-            is_system = excluded.is_system,
-            capabilities_json = excluded.capabilities_json,
-            updated_at = current_timestamp
-      `
-    } else {
-      // First-boot seed for the role; preserve any later customisation.
-      await db`
-        insert into roles (id, slug, name, description, is_system, capabilities_json)
-        values (${role.id}, ${role.slug}, ${role.name}, ${role.description}, ${true}, ${role.capabilities})
-        on conflict (id) do nothing
-      `
-    }
-  }
+export async function syncSystemRoles(_db: DbClient): Promise<void> {
+  await getConvex().mutation(api.roles.sync, {
+    roles: SYSTEM_ROLES.map((role) => ({
+      id: role.id,
+      slug: role.slug,
+      name: role.name,
+      description: role.description,
+      capabilities: role.capabilities,
+      forceSync: FORCE_SYNC_ROLE_IDS.includes(role.id),
+    })),
+  })
 }

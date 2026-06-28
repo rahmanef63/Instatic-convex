@@ -32,7 +32,7 @@ export default defineSchema({
     created_at: v.string(),
     updated_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_slug', ['slug']),
 
   users: defineTable({
@@ -65,7 +65,7 @@ export default defineSchema({
       v.literal(60),
     ),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_email_normalized', ['email_normalized'])
     .index('by_role_id', ['role_id']),
 
@@ -112,7 +112,7 @@ export default defineSchema({
       v.literal('mfa_failed'),
     ),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_ip_attempted', ['ip_address', 'attempted_at'])
     .index('by_email_attempted', ['email_norm', 'attempted_at'])
     .index('by_user_attempted', ['user_id', 'attempted_at']),
@@ -126,7 +126,7 @@ export default defineSchema({
     settings_json: v.string(),
     created_at: v.string(),
     updated_at: v.string(),
-  }).index('by_id', ['id']),
+  }).index('by_app_id', ['id']),
 
   site_snapshots: defineTable({
     id: v.string(),
@@ -136,7 +136,7 @@ export default defineSchema({
     importmap_sha256: v.union(v.null(), v.string()),
     created_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_content_hash', ['content_hash']),
 
   audit_events: defineTable({
@@ -150,7 +150,7 @@ export default defineSchema({
     user_agent: v.union(v.null(), v.string()),
     created_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_created', ['created_at']),
 
   // ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ export default defineSchema({
     updated_at: v.string(),
     deleted_at: v.union(v.string(), v.null()),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_slug', ['slug']),
 
   data_rows: defineTable({
@@ -205,7 +205,7 @@ export default defineSchema({
     deleted_at: v.union(v.null(), v.string()),
     plugin_actor_id: v.union(v.null(), v.string()),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_table_slug', ['table_id', 'slug'])
     .index('by_table_updated', ['table_id', 'updated_at'])
     .index('by_table_status_updated', ['table_id', 'status', 'updated_at'])
@@ -225,7 +225,7 @@ export default defineSchema({
     site_snapshot_id: v.union(v.null(), v.string()),
     runtime_assets_json: v.union(v.null(), v.string()),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_row_version', ['row_id', 'version_number'])
     .index('by_slug', ['slug']),
 
@@ -237,7 +237,7 @@ export default defineSchema({
     target_row_id: v.string(),
     created_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_source', ['from_route_base', 'from_slug'])
     .index('by_target', ['target_row_id', 'created_at'])
     .index('by_table', ['table_id']),
@@ -271,7 +271,7 @@ export default defineSchema({
     storage_adapter_id: v.string(),
     externally_hosted: v.boolean(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_deleted', ['deleted_at'])
     .index('by_public_path', ['public_path'])
     .index('by_storage_adapter', ['storage_adapter_id'])
@@ -286,7 +286,7 @@ export default defineSchema({
     created_by_user_id: v.union(v.null(), v.string()),
     created_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_parent_slug', ['parent_id', 'slug'])
     .index('by_parent', ['parent_id']),
 
@@ -304,7 +304,7 @@ export default defineSchema({
     query_json: v.string(),
     created_by_user_id: v.union(v.null(), v.string()),
     created_at: v.string(),
-  }).index('by_id', ['id']),
+  }).index('by_app_id', ['id']),
 
   media_usage_refs: defineTable({
     asset_id: v.string(),
@@ -325,7 +325,7 @@ export default defineSchema({
     content_bytes: v.bytes(),
     created_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_public_path', ['public_path'])
     .index('by_data_row_version', ['data_row_version_id']),
 
@@ -367,7 +367,7 @@ export default defineSchema({
     installed_at: v.string(),
     updated_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_enabled_installed', ['enabled', 'installed_at']),
 
   plugin_records: defineTable({
@@ -378,7 +378,7 @@ export default defineSchema({
     created_at: v.string(),
     updated_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_resource', ['plugin_id', 'resource_id', 'created_at'])
     .index('by_plugin', ['plugin_id']),
 
@@ -389,7 +389,7 @@ export default defineSchema({
     reason: v.string(),
     stack: v.union(v.null(), v.string()),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_plugin_occurred', ['plugin_id', 'occurred_at']),
 
   plugin_schedules: defineTable({
@@ -445,7 +445,7 @@ export default defineSchema({
     duration_ms: v.union(v.null(), v.number()),
     triggered_by: v.union(v.literal('tick'), v.literal('run-now')),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_lookup', ['plugin_id', 'schedule_id', 'started_at'])
     .index('by_plugin', ['plugin_id']),
 
@@ -478,7 +478,7 @@ export default defineSchema({
     updated_at: v.string(),
     last_used_at: v.union(v.null(), v.string()),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_user', ['user_id'])
     .index('by_user_label', ['user_id', 'provider_id', 'display_label']),
 
@@ -519,7 +519,7 @@ export default defineSchema({
     updated_at: v.string(),
     deleted_at: v.union(v.null(), v.string()),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_user_scope_updated', ['user_id', 'scope', 'updated_at'])
     .index('by_deleted', ['deleted_at']),
 
@@ -542,7 +542,7 @@ export default defineSchema({
     cache_creation_tokens: v.number(),
     created_at: v.string(),
   })
-    .index('by_id', ['id'])
+    .index('by_app_id', ['id'])
     .index('by_conversation_position', ['conversation_id', 'position']),
 
   ai_model_pricing: defineTable({

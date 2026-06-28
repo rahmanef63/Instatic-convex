@@ -1,4 +1,23 @@
+/**
+ * Setup / first-run wizard repository.
+ *
+ * Convex port: this file is now a thin adapter over `convex/setup.ts` (see
+ * docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
+ * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
+ * so handlers keep calling these unchanged while the rest of the runtime is
+ * still on the SQL path; the bodies read/write through the shared `getConvex()`
+ * handle instead.
+ *
+ * The in-process `getSetupStatusCached` memo stays here on purpose: it is keyed
+ * by the server-process client handle and short-circuits the live status read
+ * on the hot unmatched-GET path. `resetSetupStatusCacheForTests` is unchanged.
+ *
+ * @see convex/setup.ts                 — the Convex query/mutation functions
+ * @see server/handlers/cms/setup.ts    — the bootstrap-install handler
+ */
+
 import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 
 interface SetupStatus {
   hasSite: boolean
@@ -7,20 +26,8 @@ interface SetupStatus {
   needsSetup: boolean
 }
 
-export async function getSetupStatus(db: DbClient): Promise<SetupStatus> {
-  const [site, owner] = await Promise.all([
-    db<{ count: number }>`select count(*) as count from site`,
-    db<{ count: number }>`
-      select count(*) as count
-      from users
-      where role_id = ${'owner'}
-        and status = ${'active'}
-        and deleted_at is null
-    `,
-  ])
-  const hasSite = Number(site.rows[0]?.count ?? 0) > 0
-  const hasOwner = Number(owner.rows[0]?.count ?? 0) > 0
-  return { hasSite, hasAdmin: hasOwner, hasOwner, needsSetup: !hasSite || !hasOwner }
+export async function getSetupStatus(_db: DbClient): Promise<SetupStatus> {
+  return getConvex().query(api.setup.getStatus, {})
 }
 
 /**
@@ -37,11 +44,11 @@ export async function getSetupStatus(db: DbClient): Promise<SetupStatus> {
 let settledStatusByDb = new WeakMap<DbClient, SetupStatus>()
 
 /**
- * Like {@link getSetupStatus}, but skips the two COUNT queries once setup is
+ * Like {@link getSetupStatus}, but skips the live status read once setup is
  * known to be complete. The router consults setup status on every unmatched
  * GET (bot probes hit that path forever on a long-lived install), so the hot
- * path must not query the database. While setup is still pending the status
- * is re-queried live on every call, so an in-progress setup is observed
+ * path must not hit the backend. While setup is still pending the status is
+ * re-queried live on every call, so an in-progress setup is observed
  * immediately.
  */
 export async function getSetupStatusCached(db: DbClient): Promise<SetupStatus> {
@@ -52,22 +59,15 @@ export async function getSetupStatusCached(db: DbClient): Promise<SetupStatus> {
   return status
 }
 
-/** Drop all memoized statuses — for tests that rewind setup state out-of-band (raw SQL deletes). */
+/** Drop all memoized statuses — for tests that rewind setup state out-of-band. */
 export function resetSetupStatusCacheForTests(): void {
   settledStatusByDb = new WeakMap()
 }
 
 export async function createSite(
-  db: DbClient,
+  _db: DbClient,
   name: string,
   settings: Record<string, unknown>,
 ): Promise<void> {
-  await db`
-    insert into site (id, name, settings_json)
-    values ('default', ${name}, ${settings})
-    on conflict (id) do update
-      set name = excluded.name,
-          settings_json = excluded.settings_json,
-          updated_at = current_timestamp
-  `
+  await getConvex().mutation(api.setup.createSite, { name, settings })
 }

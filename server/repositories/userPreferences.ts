@@ -1,24 +1,30 @@
 /**
  * User preferences repository — CRUD over the `user_preferences` table.
  *
- * One row per (user_id, key). `value_json` carries the JSON-serialised
- * preference payload — the column suffix `_json` triggers the SQLite
- * adapter's auto-stringify on write + auto-parse on read, so this file
- * passes plain JS objects in both directions and the dialect adapter
- * handles the serialisation transparently (see CLAUDE.md "Database
- * dialect rules").
+ * One row per (user_id, key). The preference payload is the hydrated JS value;
+ * its JSON (de)serialisation now lives in the Convex functions (the
+ * `value_json` blob is opaque at the data layer — see
+ * docs/CONVEX-MIGRATION.md §6).
  *
- * Schema validation lives at the HTTP boundary, not in this repository.
- * The handler validates incoming payloads against the per-key TypeBox
- * schemas in `src/core/persistence/userPreferences.ts` before this
- * repository ever sees them, and re-validates on read. We pass `unknown`
- * around inside the repo so the type system doesn't lie about contents.
+ * Schema validation lives at the HTTP boundary, not in this repository. The
+ * handler validates incoming payloads against the per-key TypeBox schemas in
+ * `src/core/persistence/userPreferences.ts` before this repository ever sees
+ * them, and re-validates on read. We pass `unknown` around inside the repo so
+ * the type system doesn't lie about contents.
+ *
+ * Convex port: this file is now a thin adapter over `convex/userPreferences.ts`
+ * (see §2). The exported signatures are frozen — the leading SQL `DbClient`
+ * handle is retained (named `_db`, intentionally unused) so handlers keep
+ * calling these unchanged while the rest of the runtime is still on the SQL
+ * path; the bodies read/write through the shared `getConvex()` handle instead.
+ * It is dropped wholesale when `server/db/*` is retired (§7). All row-shaping,
+ * the read-then-patch upsert, and `updated_at` generation now live in the
+ * Convex functions.
+ *
+ * @see convex/userPreferences.ts  — the Convex query/mutation functions
  */
 import type { DbClient } from '../db/client'
-
-interface UserPreferenceRow {
-  value_json: unknown
-}
+import { api, getConvex } from '../convex/client'
 
 /**
  * Read a single preference. Returns `null` when the row doesn't exist
@@ -28,48 +34,30 @@ interface UserPreferenceRow {
  *
  * NB: the client-side helper in `@core/persistence/userPreferences`
  * uses the unprefixed name (`getUserPreference`) for the HTTP round-trip.
- * This is the server-side SQL counterpart — the `…Row` suffix mirrors
- * other repository conventions (e.g. `readMediaAssetRow`).
+ * This is the server-side counterpart — the `…Row` suffix mirrors other
+ * repository conventions (e.g. `readMediaAssetRow`).
  */
 export async function getUserPreferenceRow(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   key: string,
 ): Promise<unknown | null> {
-  const { rows } = await db<UserPreferenceRow>`
-    select value_json
-    from user_preferences
-    where user_id = ${userId}
-      and key = ${key}
-  `
-  if (rows.length === 0) return null
-  // The SQLite adapter auto-parses `_json` columns on read; the Postgres
-  // driver returns `jsonb` as a parsed value too. So `value_json` is the
-  // hydrated JS value, not a string.
-  return rows[0]!.value_json
+  return getConvex().query(api.userPreferences.get, { userId, key })
 }
 
 /**
- * Upsert a preference. The dialect adapter serialises `value` to JSON for
- * us via the `_json` column convention.
- *
- * Updates `updated_at` to the current timestamp on every write — even a
- * no-op overwrite — so admins can see "last touched" if we ever surface
- * a preferences-debug page.
+ * Upsert a preference. The Convex function serialises `value` to the
+ * `value_json` blob and stamps `updated_at` with the current timestamp on
+ * every write — even a no-op overwrite — so admins can see "last touched" if
+ * we ever surface a preferences-debug page.
  */
 export async function upsertUserPreferenceRow(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   key: string,
   value: unknown,
 ): Promise<void> {
-  await db`
-    insert into user_preferences (user_id, key, value_json, updated_at)
-    values (${userId}, ${key}, ${value}, current_timestamp)
-    on conflict (user_id, key) do update
-      set value_json = excluded.value_json,
-          updated_at = current_timestamp
-  `
+  await getConvex().mutation(api.userPreferences.upsert, { userId, key, value })
 }
 
 /**
@@ -79,14 +67,9 @@ export async function upsertUserPreferenceRow(
  * distinguishing — the wire-level handler returns 204 either way).
  */
 export async function deleteUserPreferenceRow(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   key: string,
 ): Promise<boolean> {
-  const result = await db`
-    delete from user_preferences
-    where user_id = ${userId}
-      and key = ${key}
-  `
-  return result.rowCount > 0
+  return getConvex().mutation(api.userPreferences.del, { userId, key })
 }

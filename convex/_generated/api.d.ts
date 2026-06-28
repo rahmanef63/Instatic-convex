@@ -15,6 +15,11 @@
  */
 
 import type * as loginAttempts from "../loginAttempts.js";
+import type * as roles from "../roles.js";
+import type * as sessions from "../sessions.js";
+import type * as setup from "../setup.js";
+import type * as userPreferences from "../userPreferences.js";
+import type * as users from "../users.js";
 import type {
   ApiFromModules,
   FilterApi,
@@ -31,6 +36,11 @@ import type {
  */
 declare const fullApi: ApiFromModules<{
   loginAttempts: typeof loginAttempts;
+  roles: typeof roles;
+  sessions: typeof sessions;
+  setup: typeof setup;
+  userPreferences: typeof userPreferences;
+  users: typeof users;
 }>;
 export declare const api: FilterApi<
   typeof fullApi,

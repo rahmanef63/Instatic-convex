@@ -1,6 +1,31 @@
+/**
+ * Users / identity repository.
+ *
+ * Convex port: the read/write bodies are now thin adapters over
+ * `convex/users.ts` (docs/CONVEX-MIGRATION.md §2). The exported signatures are
+ * frozen — the leading SQL `DbClient` handle is retained (named `_db`,
+ * intentionally unused) so handlers keep calling these unchanged while the rest
+ * of the runtime is still on the SQL path; it is dropped wholesale when
+ * `server/db/*` is retired (§7).
+ *
+ * What stays here, on the Bun side:
+ * - **`rowToUser`** — the single hydration mapper. The Convex functions return
+ *   a *joined row* (user + role + avatar `public_path`) shaped exactly like
+ *   `JoinedUserRow`; `rowToUser` turns it into `AuthUser`. The still-SQL session
+ *   lookup in `server/auth/sessions.ts` calls the same `rowToUser`, so there is
+ *   one hydration path, and Node-only `computeGravatarHash` + the `@core`
+ *   capability canon never have to run inside Convex's V8 runtime.
+ * - **`USER_JOINED_COLUMNS`** — still consumed by the (un-ported) session lookup
+ *   (`server/auth/sessions.ts`), kept until that domain is migrated.
+ * - **`computeGravatarHash` / `toPublicUser`** — exported, also consumed by
+ *   `server/handlers/cms/{dashboard/activity,auth}.ts`.
+ * - **TOTP encryption** (`encryptTotpSecret`) — uses the server master key, so
+ *   it runs here; the resulting AES-GCM bytes cross to Convex as base64.
+ *
+ * @see convex/users.ts          — the Convex query/mutation functions
+ * @see server/auth/sessions.ts  — the (still-SQL) session lookup sharing rowToUser
+ */
 import { createHash } from 'node:crypto'
-import { nanoid } from 'nanoid'
-import { placeholder, type DbClient } from '../db/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import { normalizeCapabilities, type CoreCapability } from '../auth/capabilities'
 import {
@@ -16,6 +41,8 @@ import {
 } from '../auth/totpSecrets'
 import type { UserRow, UserStatus } from '../types'
 import { Type, filterArray } from '@core/utils/typeboxHelpers'
+import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 
 interface UserRole {
   id: string
@@ -67,13 +94,12 @@ export interface JoinedUserRow extends UserRow {
 }
 
 /**
- * The full user + role + avatar column list, defined exactly once. Every read
- * that hydrates an `AuthUser` (the three lookups below plus the session-cookie
- * lookup in `server/auth/sessions.ts`) splices this into a `db.unsafe()` SELECT
- * so the 18 user columns, 5 role columns, and avatar join column live in a
- * single place. Pair it with the shared `from users join roles …` clause via
- * `queryUsers`, or — when the FROM differs (the session lookup joins through
- * `sessions`) — splice the constant directly.
+ * The full user + role + avatar column list, defined exactly once. The session
+ * lookup in `server/auth/sessions.ts` (still on the SQL path) splices this into
+ * a `db.unsafe()` SELECT so the user, role, and avatar columns live in a single
+ * place. The users repository itself no longer issues SQL — its reads go
+ * through `convex/users.ts`, which returns the same `JoinedUserRow` shape — but
+ * the constant stays exported until the session domain is ported too.
  */
 export const USER_JOINED_COLUMNS = `users.id,
        users.email,
@@ -106,42 +132,38 @@ export const USER_JOINED_COLUMNS = `users.id,
        media_assets.public_path as avatar_public_path`
 
 /**
- * Run a `select <USER_JOINED_COLUMNS> from users join roles …` with a
- * caller-supplied trailing clause (WHERE / ORDER / LIMIT). The `clause` must
- * use dialect-aware placeholders from `placeholder(db.dialect, n)` for its
- * bound parameters so the same SQL runs on Postgres and SQLite.
+ * The joined row as it arrives from `convex/users.ts`: identical to
+ * `JoinedUserRow` except the two MFA-secret blobs travel as base64 strings
+ * (Convex stores them base64-encoded, §6) rather than `Uint8Array`s, and the
+ * `*_json` columns are already parsed. `wireToJoinedRow` decodes the blobs back
+ * to bytes so `rowToUser` sees exactly its `JoinedUserRow` contract.
  */
-async function queryUsers(
-  db: DbClient,
-  clause: string,
-  params: unknown[] = [],
-): Promise<JoinedUserRow[]> {
-  const { rows } = await db.unsafe<JoinedUserRow>(
-    `select ${USER_JOINED_COLUMNS}
-     from users
-     join roles on roles.id = users.role_id
-     left join media_assets on media_assets.id = users.avatar_media_id
-     ${clause}`,
-    params,
-  )
-  return rows
+type ConvexUserRow = Omit<
+  JoinedUserRow,
+  'mfa_totp_secret_ciphertext' | 'mfa_totp_secret_iv'
+> & {
+  mfa_totp_secret_ciphertext: string | null
+  mfa_totp_secret_iv: string | null
 }
 
-/**
- * Shared tail for every "mutate one user row, then return the refreshed public
- * view" repository action. The UPDATE/INSERT itself carries no `returning` — the
- * 21-column user shape is hydrated through the three-table `findUserById` join,
- * so re-selecting is cheaper and keeps a single source for the hydration. A zero
- * `rowCount` (row missing or soft-deleted) maps to `null`.
- */
-async function reloadPublicUser(
-  db: DbClient,
-  userId: string,
-  rowCount: number,
-): Promise<CmsUser | null> {
-  if (rowCount === 0) return null
-  const refreshed = await findUserById(db, userId)
-  return refreshed ? toPublicUser(refreshed) : null
+function decodeMfaSecret(value: string | null): Uint8Array | null {
+  return value === null ? null : new Uint8Array(Buffer.from(value, 'base64'))
+}
+
+function wireToJoinedRow(row: ConvexUserRow): JoinedUserRow {
+  return {
+    ...row,
+    mfa_totp_secret_ciphertext: decodeMfaSecret(row.mfa_totp_secret_ciphertext),
+    mfa_totp_secret_iv: decodeMfaSecret(row.mfa_totp_secret_iv),
+  }
+}
+
+function authUserFromWire(row: ConvexUserRow): AuthUser {
+  return rowToUser(wireToJoinedRow(row))
+}
+
+function publicUserFromWire(row: ConvexUserRow): CmsUser {
+  return toPublicUser(authUserFromWire(row))
 }
 
 const RecoveryCodeHashSchema = Type.String()
@@ -244,34 +266,25 @@ export function toPublicUser(user: AuthUser): CmsUser {
   }
 }
 
-export async function listUsers(db: DbClient): Promise<CmsUser[]> {
-  const rows = await queryUsers(
-    db,
-    'where users.deleted_at is null order by users.created_at asc',
-  )
-  return rows.map((row) => toPublicUser(rowToUser(row)))
+export async function listUsers(_db: DbClient): Promise<CmsUser[]> {
+  const rows = await getConvex().query(api.users.list, {})
+  return rows.map(publicUserFromWire)
 }
 
-export async function findUserById(db: DbClient, userId: string): Promise<AuthUser | null> {
-  const rows = await queryUsers(
-    db,
-    `where users.id = ${placeholder(db.dialect, 1)} and users.deleted_at is null limit 1`,
-    [userId],
-  )
-  return rows[0] ? rowToUser(rows[0]) : null
+export async function findUserById(_db: DbClient, userId: string): Promise<AuthUser | null> {
+  const row = await getConvex().query(api.users.findById, { userId })
+  return row ? authUserFromWire(row) : null
 }
 
-export async function findUserByEmail(db: DbClient, email: string): Promise<AuthUser | null> {
-  const rows = await queryUsers(
-    db,
-    `where users.email_normalized = ${placeholder(db.dialect, 1)} and users.deleted_at is null limit 1`,
-    [normalizeEmail(email)],
-  )
-  return rows[0] ? rowToUser(rows[0]) : null
+export async function findUserByEmail(_db: DbClient, email: string): Promise<AuthUser | null> {
+  const row = await getConvex().query(api.users.findByEmail, {
+    emailNormalized: normalizeEmail(email),
+  })
+  return row ? authUserFromWire(row) : null
 }
 
 export async function createUser(
-  db: DbClient,
+  _db: DbClient,
   input: {
     id?: string
     email: string
@@ -286,23 +299,26 @@ export async function createUser(
   const emailNormalized = normalizeEmail(email)
   if (!emailNormalized.includes('@')) throw new UserMutationError('Invalid email')
   const displayName = input.displayName.trim() || email
-  const id = input.id ?? nanoid()
   const status = input.status ?? 'active'
   if (input.roleId === 'owner' && input.allowOwnerRole !== true) {
     throw new UserMutationError('Owner role is setup-only')
   }
 
-  await db`
-    insert into users (id, email, email_normalized, display_name, password_hash, status, role_id)
-    values (${id}, ${email}, ${emailNormalized}, ${displayName}, ${input.passwordHash}, ${status}, ${input.roleId})
-  `
-  const created = await findUserById(db, id)
-  if (!created) throw new UserMutationError('User was not created', 500)
-  return toPublicUser(created)
+  const row = await getConvex().mutation(api.users.create, {
+    id: input.id,
+    email,
+    emailNormalized,
+    displayName,
+    passwordHash: input.passwordHash,
+    status,
+    roleId: input.roleId,
+  })
+  if (!row) throw new UserMutationError('User was not created', 500)
+  return publicUserFromWire(row)
 }
 
 export async function updateUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   input: {
     email?: string
@@ -312,7 +328,7 @@ export async function updateUser(
     roleId?: string
   },
 ): Promise<CmsUser | null> {
-  const current = await findUserById(db, userId)
+  const current = await findUserById(_db, userId)
   if (!current) return null
 
   const email = input.email === undefined ? current.email : input.email.trim()
@@ -324,22 +340,21 @@ export async function updateUser(
   const status = input.status ?? current.status
   const roleId = input.roleId ?? current.role.id
   const passwordHash = input.passwordHash ?? current.passwordHash
-  const passwordUpdatedAt = input.passwordHash === undefined ? current.passwordUpdatedAt : new Date()
+  const passwordUpdatedAt = input.passwordHash === undefined
+    ? current.passwordUpdatedAt
+    : new Date().toISOString()
 
-  const result = await db`
-    update users
-    set email = ${email},
-        email_normalized = ${emailNormalized},
-        display_name = ${displayName},
-        password_hash = ${passwordHash},
-        password_updated_at = ${passwordUpdatedAt},
-        status = ${status},
-        role_id = ${roleId},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.update, {
+    userId,
+    email,
+    emailNormalized,
+    displayName,
+    passwordHash,
+    passwordUpdatedAt,
+    status,
+    roleId,
+  })
+  return row ? publicUserFromWire(row) : null
 }
 
 /**
@@ -348,38 +363,28 @@ export async function updateUser(
  * the target row is missing/soft-deleted.
  */
 export async function setUserAvatarMediaId(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   mediaId: string | null,
 ): Promise<CmsUser | null> {
-  const result = await db`
-    update users
-    set avatar_media_id = ${mediaId},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.setAvatarMediaId, { userId, mediaId })
+  return row ? publicUserFromWire(row) : null
 }
 
 export async function updateUserPasswordHash(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   passwordHash: string,
 ): Promise<CmsUser | null> {
-  const result = await db`
-    update users
-    set password_hash = ${passwordHash},
-        password_updated_at = current_timestamp,
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.updatePasswordHash, {
+    userId,
+    passwordHash,
+  })
+  return row ? publicUserFromWire(row) : null
 }
 
 export async function enableUserTotpMfa(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   input: {
     secret: string
@@ -387,125 +392,70 @@ export async function enableUserTotpMfa(
   },
 ): Promise<CmsUser | null> {
   const encryptedSecret = await encryptTotpSecret(input.secret)
-  const result = await db`
-    update users
-    set mfa_enabled = ${true},
-        mfa_enabled_at = current_timestamp,
-        mfa_totp_secret_ciphertext = ${encryptedSecret.ciphertext},
-        mfa_totp_secret_iv = ${encryptedSecret.iv},
-        mfa_totp_secret_key_fingerprint = ${encryptedSecret.keyFingerprint},
-        mfa_recovery_code_hashes_json = ${input.recoveryCodeHashes},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.enableTotpMfa, {
+    userId,
+    ciphertext: Buffer.from(encryptedSecret.ciphertext).toString('base64'),
+    iv: Buffer.from(encryptedSecret.iv).toString('base64'),
+    keyFingerprint: encryptedSecret.keyFingerprint,
+    recoveryCodeHashes: input.recoveryCodeHashes,
+  })
+  return row ? publicUserFromWire(row) : null
 }
 
 export async function disableUserTotpMfa(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
 ): Promise<CmsUser | null> {
-  const result = await db`
-    update users
-    set mfa_enabled = ${false},
-        mfa_enabled_at = ${null},
-        mfa_totp_secret_ciphertext = ${null},
-        mfa_totp_secret_iv = ${null},
-        mfa_totp_secret_key_fingerprint = ${null},
-        mfa_recovery_code_hashes_json = ${[]},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.disableTotpMfa, { userId })
+  return row ? publicUserFromWire(row) : null
 }
 
 export async function replaceUserRecoveryCodeHashes(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   recoveryCodeHashes: string[],
 ): Promise<CmsUser | null> {
-  const result = await db`
-    update users
-    set mfa_recovery_code_hashes_json = ${recoveryCodeHashes},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-      and mfa_enabled = ${true}
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.replaceRecoveryCodeHashes, {
+    userId,
+    recoveryCodeHashes,
+  })
+  return row ? publicUserFromWire(row) : null
 }
 
 export async function updateUserStepUpPolicy(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   input: {
     mode: StepUpAuthMode
     windowMinutes: StepUpWindowMinutes
   },
 ): Promise<CmsUser | null> {
-  const result = await db`
-    update users
-    set step_up_auth_mode = ${input.mode},
-        step_up_window_minutes = ${input.windowMinutes},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return reloadPublicUser(db, userId, result.rowCount)
+  const row = await getConvex().mutation(api.users.updateStepUpPolicy, {
+    userId,
+    mode: input.mode,
+    windowMinutes: input.windowMinutes,
+  })
+  return row ? publicUserFromWire(row) : null
 }
 
 export async function consumeUserRecoveryCodeHash(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   usedHash: string,
 ): Promise<boolean> {
-  const user = await findUserById(db, userId)
-  if (!user || !user.mfaRecoveryCodeHashes.includes(usedHash)) return false
-  const remaining = user.mfaRecoveryCodeHashes.filter((hash) => hash !== usedHash)
-  const result = await db`
-    update users
-    set mfa_recovery_code_hashes_json = ${remaining},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-      and mfa_enabled = ${true}
-  `
-  return result.rowCount > 0
+  return getConvex().mutation(api.users.consumeRecoveryCodeHash, { userId, usedHash })
 }
 
-export async function softDeleteUser(db: DbClient, userId: string): Promise<boolean> {
-  const result = await db`
-    update users
-    set deleted_at = current_timestamp,
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-  `
-  return result.rowCount > 0
+export async function softDeleteUser(_db: DbClient, userId: string): Promise<boolean> {
+  return getConvex().mutation(api.users.softDelete, { userId })
 }
 
-export async function countActiveOwners(db: DbClient): Promise<number> {
-  const { rows } = await db<{ count: number }>`
-    select count(*) as count
-    from users
-    where role_id = ${'owner'}
-      and status = ${'active'}
-      and deleted_at is null
-  `
-  return Number(rows[0]?.count ?? 0)
+export async function countActiveOwners(_db: DbClient): Promise<number> {
+  return getConvex().query(api.users.countActiveOwners, {})
 }
 
-export async function markUserLoggedIn(db: DbClient, userId: string): Promise<void> {
-  await db`
-    update users
-    set last_login_at = current_timestamp,
-        failed_login_count = 0,
-        locked_until = ${null},
-        updated_at = current_timestamp
-    where id = ${userId}
-  `
+export async function markUserLoggedIn(_db: DbClient, userId: string): Promise<void> {
+  await getConvex().mutation(api.users.markLoggedIn, { userId })
 }
 
 /**
@@ -517,22 +467,12 @@ export async function markUserLoggedIn(db: DbClient, userId: string): Promise<vo
  * responsible for not double-counting (one call per failed attempt).
  */
 export async function recordFailedLoginAttempt(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   lockedUntil: Date | null,
 ): Promise<{ failedLoginCount: number; lockedUntil: string | null } | null> {
-  const { rows } = await db<{ failed_login_count: number; locked_until: Date | string | null }>`
-    update users
-    set failed_login_count = failed_login_count + 1,
-        locked_until = ${lockedUntil},
-        updated_at = current_timestamp
-    where id = ${userId}
-      and deleted_at is null
-    returning failed_login_count, locked_until
-  `
-  if (!rows[0]) return null
-  return {
-    failedLoginCount: Number(rows[0].failed_login_count ?? 0),
-    lockedUntil: isoDateOrNull(rows[0].locked_until),
-  }
+  return getConvex().mutation(api.users.recordFailedLoginAttempt, {
+    userId,
+    lockedUntil: lockedUntil === null ? null : lockedUntil.toISOString(),
+  })
 }
