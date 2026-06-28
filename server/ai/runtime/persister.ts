@@ -8,6 +8,7 @@
  */
 
 import type { DbClient } from '../../db/client'
+import { api, getConvex } from '../../convex/client'
 import { appendMessage } from '../conversations/store'
 import { resolveCostUsd } from '../pricing'
 import { normalizeContextTokens } from '../contextTokens'
@@ -158,11 +159,11 @@ export function createConversationsPersister(
         cacheReadTokens: usage.cacheReadTokens ?? 0,
         cacheCreationTokens: usage.cacheCreationTokens ?? 0,
       })
-      // Lightweight UPDATE — bypasses the repository because there's no
-      // public-facing API for "patch the latest message". Single-table
-      // write, no FK touch.
+      // Lightweight write — bypasses the repository because there's no
+      // public-facing API for "patch the latest message". One atomic Convex
+      // mutation patches the message AND propagates the delta onto the parent
+      // conversation totals (§3 #16).
       await updateMessageUsage(
-        db,
         lastAssistantMessageId,
         usage.promptTokens,
         usage.completionTokens,
@@ -176,7 +177,6 @@ export function createConversationsPersister(
 }
 
 async function updateMessageUsage(
-  db: DbClient,
   messageId: string,
   promptTokens: number,
   completionTokens: number,
@@ -187,37 +187,14 @@ async function updateMessageUsage(
 ): Promise<void> {
   // Move the increment off the message row (which started at zero in
   // appendMessage) AND propagate the delta onto the parent conversation
-  // totals so the list view stays consistent.
-  await db.transaction(async (tx) => {
-    const { rows } = await tx<{ conversation_id: string }>`
-      select conversation_id
-      from ai_messages
-      where id = ${messageId}
-      limit 1
-    `
-    const conversationId = rows[0]?.conversation_id
-    if (!conversationId) return
-
-    await tx`
-      update ai_messages
-      set prompt_tokens = ${promptTokens},
-          completion_tokens = ${completionTokens},
-          cost_usd = ${costUsd},
-          cache_read_tokens = ${cacheReadTokens},
-          cache_creation_tokens = ${cacheCreationTokens}
-      where id = ${messageId}
-    `
-
-    await tx`
-      update ai_conversations
-      set prompt_tokens_total = prompt_tokens_total + ${promptTokens},
-          completion_tokens_total = completion_tokens_total + ${completionTokens},
-          cost_usd_total = cost_usd_total + ${costUsd},
-          cache_read_tokens_total = cache_read_tokens_total + ${cacheReadTokens},
-          cache_creation_tokens_total = cache_creation_tokens_total + ${cacheCreationTokens},
-          context_tokens = ${contextTokens},
-          updated_at = current_timestamp
-      where id = ${conversationId}
-    `
+  // totals so the list view stays consistent — all in one atomic mutation.
+  await getConvex().mutation(api.aiConversations.updateMessageTokens, {
+    messageId,
+    promptTokens,
+    completionTokens,
+    costUsd,
+    cacheReadTokens,
+    cacheCreationTokens,
+    contextTokens,
   })
 }

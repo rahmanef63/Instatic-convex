@@ -1,15 +1,26 @@
 /**
  * Media folder repository.
  *
+ * Convex port: the read/write bodies are now thin adapters over
+ * `convex/mediaFolders.ts` (docs/CONVEX-MIGRATION.md §2). The exported
+ * signatures are frozen — the leading SQL `DbClient` handle is retained (named
+ * `_db`, intentionally unused) so handlers keep calling these unchanged while
+ * the rest of the runtime is still on the SQL path; it is dropped wholesale when
+ * `server/db/*` is retired (§7). The pure `mapFolder` hydrator stays here.
+ *
  * Backs the HappyFiles-style folder tree on the Media page. Folders form a
  * tree via `parent_id` (null = root). Slugs are unique within a parent so
- * users can have two "Logos" folders under different roots.
+ * users can have two "Logos" folders under different roots — uniqueness is
+ * re-expressed as an explicit index read in `convex/mediaFolders.ts` (§4.6).
  *
  * Asset membership is many-to-many through `media_asset_folders` — see
  * `repositories/media.ts → assignAssetToFolders` for that join.
+ *
+ * @see convex/mediaFolders.ts — the Convex query/mutation functions
  */
 import type { DbClient } from '../db/client'
 import { isoDate } from '@core/utils/isoDate'
+import { api, getConvex } from '../convex/client'
 
 interface MediaFolder {
   id: string
@@ -59,101 +70,63 @@ function mapFolder(row: MediaFolderRow): MediaFolder {
   }
 }
 
-export async function listMediaFolders(db: DbClient): Promise<MediaFolder[]> {
-  const { rows } = await db<MediaFolderRow>`
-    select id, parent_id, name, slug, sort_order, created_by_user_id, created_at
-    from media_folders
-    order by sort_order asc, lower(name) asc
-  `
+export async function listMediaFolders(_db: DbClient): Promise<MediaFolder[]> {
+  const rows = await getConvex().query(api.mediaFolders.list, {})
   return rows.map(mapFolder)
 }
 
 export async function getMediaFolder(
-  db: DbClient,
+  _db: DbClient,
   id: string,
 ): Promise<MediaFolder | null> {
-  const { rows } = await db<MediaFolderRow>`
-    select id, parent_id, name, slug, sort_order, created_by_user_id, created_at
-    from media_folders
-    where id = ${id}
-  `
-  return rows[0] ? mapFolder(rows[0]) : null
+  const row = await getConvex().query(api.mediaFolders.get, { id })
+  return row ? mapFolder(row) : null
 }
 
 export async function createMediaFolder(
-  db: DbClient,
+  _db: DbClient,
   input: CreateMediaFolderInput,
 ): Promise<MediaFolder> {
-  const sortOrder = input.sortOrder ?? 0
-  const { rows } = await db<MediaFolderRow>`
-    insert into media_folders (id, parent_id, name, slug, sort_order, created_by_user_id)
-    values (
-      ${input.id},
-      ${input.parentId},
-      ${input.name},
-      ${input.slug},
-      ${sortOrder},
-      ${input.createdByUserId}
-    )
-    returning id, parent_id, name, slug, sort_order, created_by_user_id, created_at
-  `
-  return mapFolder(rows[0])
+  const row = await getConvex().mutation(api.mediaFolders.create, {
+    id: input.id,
+    parentId: input.parentId,
+    name: input.name,
+    slug: input.slug,
+    sortOrder: input.sortOrder ?? 0,
+    createdByUserId: input.createdByUserId,
+  })
+  return mapFolder(row)
 }
 
 export async function updateMediaFolder(
-  db: DbClient,
+  _db: DbClient,
   id: string,
   input: UpdateMediaFolderInput,
 ): Promise<MediaFolder | null> {
-  // COALESCE pattern — `undefined` → NULL → keep-existing — same trick used in
-  // the assets repo. One query shape regardless of how many fields changed,
-  // dialect-portable.
-  const name = input.name ?? null
-  const slug = input.slug ?? null
-  // Distinguish "don't touch parent_id" from "set parent_id to NULL" by using
-  // a sentinel: an explicit `null` parent (move to root) is opt-in by passing
-  // `parentId: null`. To handle both cases we route through two query shapes.
-  const sortOrder = input.sortOrder ?? null
-
-  if (input.parentId !== undefined) {
-    const { rows } = await db<MediaFolderRow>`
-      update media_folders set
-        name = coalesce(${name}, name),
-        slug = coalesce(${slug}, slug),
-        parent_id = ${input.parentId},
-        sort_order = coalesce(${sortOrder}, sort_order)
-      where id = ${id}
-      returning id, parent_id, name, slug, sort_order, created_by_user_id, created_at
-    `
-    if (rows.length === 0) return null
-    return mapFolder(rows[0])
-  }
-
-  const { rows } = await db<MediaFolderRow>`
-    update media_folders set
-      name = coalesce(${name}, name),
-      slug = coalesce(${slug}, slug),
-      sort_order = coalesce(${sortOrder}, sort_order)
-    where id = ${id}
-    returning id, parent_id, name, slug, sort_order, created_by_user_id, created_at
-  `
-  if (rows.length === 0) return null
-  return mapFolder(rows[0])
+  // `parentId` distinguishes "don't touch" (undefined → stripped from the wire
+  // args → keep existing) from "move to root" (explicit null). `name`/`slug`/
+  // `sortOrder` undefined likewise keep the existing column (COALESCE-keep).
+  const row = await getConvex().mutation(api.mediaFolders.update, {
+    id,
+    name: input.name,
+    slug: input.slug,
+    sortOrder: input.sortOrder,
+    parentId: input.parentId,
+  })
+  return row ? mapFolder(row) : null
 }
 
 /**
- * Delete a folder. `ON DELETE CASCADE` removes child folders and asset
- * membership rows automatically — the assets themselves stay (they just
+ * Delete a folder. The whole `parent_id` subtree and the asset-membership rows
+ * of every deleted folder are removed (the SQL `ON DELETE CASCADE`, reproduced
+ * explicitly in the Convex mutation) — the assets themselves stay (they just
  * become Uncategorized).
  */
 export async function deleteMediaFolder(
-  db: DbClient,
+  _db: DbClient,
   id: string,
 ): Promise<boolean> {
-  const result = await db`
-    delete from media_folders where id = ${id}
-  `
-  return result.rowCount > 0
+  return getConvex().mutation(api.mediaFolders.del, { id })
 }
 
 // ---------------------------------------------------------------------------
@@ -182,8 +155,8 @@ export async function listExportableMediaFolders(db: DbClient): Promise<Exportab
 }
 
 /** Wipe all folders (cascades membership) — used by the `replace` import strategy. */
-export async function deleteAllMediaFolders(db: DbClient): Promise<void> {
-  await db`delete from media_folders`
+export async function deleteAllMediaFolders(_db: DbClient): Promise<void> {
+  await getConvex().mutation(api.mediaFolders.deleteAll, {})
 }
 
 /**
@@ -193,25 +166,16 @@ export async function deleteAllMediaFolders(db: DbClient): Promise<void> {
  * bundle import handler.
  */
 export async function importMediaFolder(
-  db: DbClient,
+  _db: DbClient,
   input: ExportableMediaFolder,
 ): Promise<void> {
-  await db`
-    insert into media_folders (id, parent_id, name, slug, sort_order, created_by_user_id)
-    values (
-      ${input.id},
-      ${input.parentId},
-      ${input.name},
-      ${input.slug},
-      ${input.sortOrder},
-      ${null}
-    )
-    on conflict (id) do update
-      set parent_id = excluded.parent_id,
-          name = excluded.name,
-          slug = excluded.slug,
-          sort_order = excluded.sort_order
-  `
+  await getConvex().mutation(api.mediaFolders.importFolder, {
+    id: input.id,
+    parentId: input.parentId,
+    name: input.name,
+    slug: input.slug,
+    sortOrder: input.sortOrder,
+  })
 }
 
 /**
@@ -220,39 +184,14 @@ export async function importMediaFolder(
  * constraint violation.
  */
 export async function isMediaFolderSlugTaken(
-  db: DbClient,
+  _db: DbClient,
   parentId: string | null,
   slug: string,
   excludeId?: string,
 ): Promise<boolean> {
-  if (excludeId) {
-    if (parentId === null) {
-      const { rows } = await db<{ id: string }>`
-        select id from media_folders
-        where parent_id is null and slug = ${slug} and id <> ${excludeId}
-        limit 1
-      `
-      return rows.length > 0
-    }
-    const { rows } = await db<{ id: string }>`
-      select id from media_folders
-      where parent_id = ${parentId} and slug = ${slug} and id <> ${excludeId}
-      limit 1
-    `
-    return rows.length > 0
-  }
-  if (parentId === null) {
-    const { rows } = await db<{ id: string }>`
-      select id from media_folders
-      where parent_id is null and slug = ${slug}
-      limit 1
-    `
-    return rows.length > 0
-  }
-  const { rows } = await db<{ id: string }>`
-    select id from media_folders
-    where parent_id = ${parentId} and slug = ${slug}
-    limit 1
-  `
-  return rows.length > 0
+  return getConvex().query(api.mediaFolders.isSlugTaken, {
+    parentId,
+    slug,
+    excludeId,
+  })
 }

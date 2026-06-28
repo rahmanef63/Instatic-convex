@@ -5,14 +5,24 @@
  * Per-user, per-scope. Every query carries `user_id` as a cross-user guard
  * (defence in depth on top of handler-level capability gating).
  *
- * Soft-delete via `deleted_at`; the nightly purge job (`purge.ts`)
+ * Soft-delete via `deleted_at`; the nightly purge job (`boot.ts`)
  * hard-deletes rows older than 30 days.
+ *
+ * Convex port: the read/write bodies are thin adapters over
+ * `convex/aiConversations.ts` (docs/CONVEX-MIGRATION.md §2). Exported
+ * signatures are frozen — the leading SQL `DbClient` handle is retained (named
+ * `_db`, unused) so handlers keep calling these unchanged; it is dropped when
+ * `server/db/*` is retired (§7). The row→record mappers + `AiContentBlockSchema`
+ * validation stay here so the `@core` TypeBox canon never runs in Convex's V8
+ * runtime.
+ *
+ * @see convex/aiConversations.ts — the Convex query/mutation functions
  */
 
-import { nanoid } from 'nanoid'
 import { Type, safeParseValue } from '@core/utils/typeboxHelpers'
 import { AiContentBlockSchema } from '@core/ai'
 import type { DbClient } from '../../db/client'
+import { api, getConvex } from '../../convex/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import type { AiContentBlock, ToolScope } from '../runtime/types'
 import type {
@@ -175,24 +185,17 @@ export function toConversationDetailView(
 
 /**
  * List non-deleted conversations for one user + scope, newest activity
- * first. Served by the `ai_conv_user_scope_idx` partial index.
+ * first. Served by the `by_user_scope_updated` index.
  */
 export async function listConversationsForUserScope(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   scope: ToolScope,
 ): Promise<ConversationRecord[]> {
-  const { rows } = await db<ConversationRow>`
-    select id, user_id, scope, title, credential_id, model_id,
-           prompt_tokens_total, completion_tokens_total,
-           cost_usd_total, cache_read_tokens_total, cache_creation_tokens_total,
-           context_tokens, created_at, updated_at, deleted_at
-    from ai_conversations
-    where user_id = ${userId}
-      and scope = ${scope}
-      and deleted_at is null
-    order by updated_at desc
-  `
+  const rows = await getConvex().query(api.aiConversations.listForUserScope, {
+    userId,
+    scope,
+  })
   return rows.map(conversationRowToRecord)
 }
 
@@ -201,22 +204,15 @@ export async function listConversationsForUserScope(
  * found / not yours / soft-deleted.
  */
 export async function readConversationForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   conversationId: string,
 ): Promise<ConversationRecord | null> {
-  const { rows } = await db<ConversationRow>`
-    select id, user_id, scope, title, credential_id, model_id,
-           prompt_tokens_total, completion_tokens_total,
-           cost_usd_total, cache_read_tokens_total, cache_creation_tokens_total,
-           context_tokens, created_at, updated_at, deleted_at
-    from ai_conversations
-    where id = ${conversationId}
-      and user_id = ${userId}
-      and deleted_at is null
-    limit 1
-  `
-  return rows[0] ? conversationRowToRecord(rows[0]) : null
+  const row = await getConvex().query(api.aiConversations.readForUser, {
+    userId,
+    conversationId,
+  })
+  return row ? conversationRowToRecord(row) : null
 }
 
 /**
@@ -224,18 +220,12 @@ export async function readConversationForUser(
  * already verified ownership via `readConversationForUser`.
  */
 export async function listMessagesForConversation(
-  db: DbClient,
+  _db: DbClient,
   conversationId: string,
 ): Promise<MessageRecord[]> {
-  const { rows } = await db<MessageRow>`
-    select id, conversation_id, position, role, content_json,
-           tool_call_id, tool_name,
-           prompt_tokens, completion_tokens, cost_usd,
-           cache_read_tokens, cache_creation_tokens, created_at
-    from ai_messages
-    where conversation_id = ${conversationId}
-    order by position asc
-  `
+  const rows = await getConvex().query(api.aiConversations.listMessages, {
+    conversationId,
+  })
   return rows.map(messageRowToRecord)
 }
 
@@ -249,38 +239,31 @@ export async function listMessagesForConversation(
  * can offer "Rename this chat").
  */
 export async function createConversationForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   input: CreateConversationInput,
 ): Promise<ConversationRecord> {
-  const id = nanoid()
   const title = (input.title ?? '').trim() || 'New conversation'
-  const { rows } = await db<ConversationRow>`
-    insert into ai_conversations (
-      id, user_id, scope, title, credential_id, model_id
-    )
-    values (
-      ${id}, ${userId}, ${input.scope}, ${title},
-      ${input.credentialId}, ${input.modelId}
-    )
-    returning id, user_id, scope, title, credential_id, model_id,
-              prompt_tokens_total, completion_tokens_total,
-              cost_usd_total, cache_read_tokens_total, cache_creation_tokens_total,
-           context_tokens, created_at, updated_at, deleted_at
-  `
-  return conversationRowToRecord(rows[0]!)
+  const row = await getConvex().mutation(api.aiConversations.create, {
+    userId,
+    scope: input.scope,
+    title,
+    credentialId: input.credentialId,
+    modelId: input.modelId,
+  })
+  return conversationRowToRecord(row)
 }
 
 /**
  * Patch a conversation. Pass only fields to update.
  */
 export async function updateConversationForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   conversationId: string,
   patch: UpdateConversationInput,
 ): Promise<ConversationRecord | null> {
-  const existing = await readConversationForUser(db, userId, conversationId)
+  const existing = await readConversationForUser(_db, userId, conversationId)
   if (!existing) return null
 
   const nextTitle = patch.title?.trim() || existing.title
@@ -289,19 +272,14 @@ export async function updateConversationForUser(
   const nextModelId =
     patch.modelId !== undefined ? patch.modelId : existing.modelId
 
-  const { rows } = await db<ConversationRow>`
-    update ai_conversations
-    set title = ${nextTitle},
-        credential_id = ${nextCredentialId},
-        model_id = ${nextModelId},
-        updated_at = current_timestamp
-    where id = ${conversationId} and user_id = ${userId}
-    returning id, user_id, scope, title, credential_id, model_id,
-              prompt_tokens_total, completion_tokens_total,
-              cost_usd_total, cache_read_tokens_total, cache_creation_tokens_total,
-           context_tokens, created_at, updated_at, deleted_at
-  `
-  return rows[0] ? conversationRowToRecord(rows[0]) : null
+  const row = await getConvex().mutation(api.aiConversations.update, {
+    userId,
+    conversationId,
+    title: nextTitle,
+    credentialId: nextCredentialId,
+    modelId: nextModelId,
+  })
+  return row ? conversationRowToRecord(row) : null
 }
 
 /**
@@ -310,116 +288,55 @@ export async function updateConversationForUser(
  * Returns true when a row was matched.
  */
 export async function softDeleteConversationForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   conversationId: string,
 ): Promise<boolean> {
-  const result = await db`
-    update ai_conversations
-    set deleted_at = current_timestamp,
-        updated_at = current_timestamp
-    where id = ${conversationId} and user_id = ${userId}
-  `
-  return result.rowCount > 0
-}
-
-/**
- * Append a message to an existing conversation. Computes the next
- * `position` from a SELECT MAX(position) — small race in the (rare) case
- * of two writers, but conversations are single-writer (one stream per
- * conversation at a time, enforced by the handler).
- *
- * Also bumps the parent conversation's `updated_at` + token + cost totals
- * so list queries pick up activity immediately.
- */
-export async function appendMessage(
-  db: DbClient,
-  conversationId: string,
-  input: AppendMessageInput,
-): Promise<MessageRecord> {
-  return db.transaction(async (tx) => {
-    const { rows: posRows } = await tx<{ next_pos: number }>`
-      select coalesce(max(position), -1) + 1 as next_pos
-      from ai_messages
-      where conversation_id = ${conversationId}
-    `
-    const position = posRows[0]?.next_pos ?? 0
-    const id = nanoid()
-    const promptTokens = input.promptTokens ?? 0
-    const completionTokens = input.completionTokens ?? 0
-    const costUsd = input.costUsd ?? 0
-    const cacheReadTokens = input.cacheReadTokens ?? 0
-    const cacheCreationTokens = input.cacheCreationTokens ?? 0
-
-    // Pass content as a plain array; both dialect adapters handle the JSON
-    // encoding (SQLite auto-stringify on bind for objects; PG jsonb native).
-    const { rows: msgRows } = await tx<MessageRow>`
-      insert into ai_messages (
-        id, conversation_id, position, role, content_json,
-        tool_call_id, tool_name,
-        prompt_tokens, completion_tokens, cost_usd,
-        cache_read_tokens, cache_creation_tokens
-      )
-      values (
-        ${id}, ${conversationId}, ${position}, ${input.role}, ${input.content},
-        ${input.toolCallId ?? null}, ${input.toolName ?? null},
-        ${promptTokens}, ${completionTokens}, ${costUsd},
-        ${cacheReadTokens}, ${cacheCreationTokens}
-      )
-      returning id, conversation_id, position, role, content_json,
-                tool_call_id, tool_name,
-                prompt_tokens, completion_tokens, cost_usd,
-                cache_read_tokens, cache_creation_tokens, created_at
-    `
-
-    // Denormalised totals on the parent — kept in sync per-append so list
-    // queries don't need to aggregate.
-    await tx`
-      update ai_conversations
-      set prompt_tokens_total = prompt_tokens_total + ${promptTokens},
-          completion_tokens_total = completion_tokens_total + ${completionTokens},
-          cost_usd_total = cost_usd_total + ${costUsd},
-          cache_read_tokens_total = cache_read_tokens_total + ${cacheReadTokens},
-          cache_creation_tokens_total = cache_creation_tokens_total + ${cacheCreationTokens},
-          updated_at = current_timestamp
-      where id = ${conversationId}
-    `
-
-    return messageRowToRecord(msgRows[0]!)
+  return getConvex().mutation(api.aiConversations.softDelete, {
+    userId,
+    conversationId,
   })
 }
 
+/**
+ * Append a message to an existing conversation. The next `position` and the
+ * parent conversation's denormalised token/cost totals are computed inside the
+ * atomic Convex mutation (§3 #14) — single-writer per conversation, so no race.
+ */
+export async function appendMessage(
+  _db: DbClient,
+  conversationId: string,
+  input: AppendMessageInput,
+): Promise<MessageRecord> {
+  const row = await getConvex().mutation(api.aiConversations.appendMessage, {
+    conversationId,
+    role: input.role,
+    content: input.content,
+    toolCallId: input.toolCallId ?? null,
+    toolName: input.toolName ?? null,
+    promptTokens: input.promptTokens ?? 0,
+    completionTokens: input.completionTokens ?? 0,
+    costUsd: input.costUsd ?? 0,
+    cacheReadTokens: input.cacheReadTokens ?? 0,
+    cacheCreationTokens: input.cacheCreationTokens ?? 0,
+  })
+  return messageRowToRecord(row)
+}
+
 // ---------------------------------------------------------------------------
-// Purge — used by the nightly tick job (purge.ts).
+// Purge — used by the nightly tick job (boot.ts).
 // ---------------------------------------------------------------------------
 
 /**
- * Hard-delete soft-deleted conversations older than `cutoffIsoString`.
- * Cascading FK takes the messages with them.
- *
- * Returns the number of CONVERSATIONS purged (counted before delete) — not
- * the raw `rowCount`, which on SQLite includes cascaded message deletions
- * and would mislead the caller.
+ * Hard-delete soft-deleted conversations older than `cutoffIsoString`, plus
+ * their messages (Convex has no cascade — `purgeSoftDeleted` deletes them
+ * explicitly, §3 #15). Returns the number of CONVERSATIONS purged.
  */
 export async function purgeSoftDeletedOlderThan(
-  db: DbClient,
+  _db: DbClient,
   cutoffIsoString: string,
 ): Promise<number> {
-  return db.transaction(async (tx) => {
-    const { rows } = await tx<{ c: number | string }>`
-      select count(*) as c
-      from ai_conversations
-      where deleted_at is not null
-        and deleted_at < ${cutoffIsoString}
-    `
-    const count = toNumber(rows[0]?.c ?? 0)
-    if (count > 0) {
-      await tx`
-        delete from ai_conversations
-        where deleted_at is not null
-          and deleted_at < ${cutoffIsoString}
-      `
-    }
-    return count
+  return getConvex().mutation(api.aiConversations.purgeSoftDeleted, {
+    cutoffIso: cutoffIsoString,
   })
 }

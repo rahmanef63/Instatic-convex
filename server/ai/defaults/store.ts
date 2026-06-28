@@ -11,6 +11,7 @@
  */
 
 import type { DbClient } from '../../db/client'
+import { api, getConvex } from '../../convex/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import type { ToolScope } from '../runtime/types'
 
@@ -48,44 +49,34 @@ function rowToRecord(row: DefaultRow): DefaultRecord {
 // Read
 // ---------------------------------------------------------------------------
 
-export async function listDefaults(db: DbClient): Promise<DefaultRecord[]> {
-  const { rows } = await db<DefaultRow>`
-    select scope, credential_id, model_id, updated_at, updated_by
-    from ai_defaults
-  `
+export async function listDefaults(_db: DbClient): Promise<DefaultRecord[]> {
+  const rows = await getConvex().query(api.aiDefaults.list, {})
   return rows.map(rowToRecord)
 }
 
 // ---------------------------------------------------------------------------
-// Write — upsert
+// Write — upsert (read-by-index → patch-or-insert, §4.6)
 // ---------------------------------------------------------------------------
 
 export async function setDefaultForScope(
-  db: DbClient,
+  _db: DbClient,
   scope: ToolScope,
   credentialId: string,
   modelId: string,
   updatedByUserId: string | null,
 ): Promise<DefaultRecord> {
-  const { rows } = await db<DefaultRow>`
-    insert into ai_defaults (scope, credential_id, model_id, updated_by)
-    values (${scope}, ${credentialId}, ${modelId}, ${updatedByUserId})
-    on conflict (scope) do update
-      set credential_id = excluded.credential_id,
-          model_id = excluded.model_id,
-          updated_by = excluded.updated_by,
-          updated_at = current_timestamp
-    returning scope, credential_id, model_id, updated_at, updated_by
-  `
-  return rowToRecord(rows[0]!)
+  const row = await getConvex().mutation(api.aiDefaults.setForScope, {
+    scope,
+    credentialId,
+    modelId,
+    updatedBy: updatedByUserId,
+  })
+  return rowToRecord(row)
 }
 
 export async function clearDefaultForScope(
-  db: DbClient,
+  _db: DbClient,
   scope: ToolScope,
 ): Promise<void> {
-  await db`
-    delete from ai_defaults
-    where scope = ${scope}
-  `
+  await getConvex().mutation(api.aiDefaults.clearForScope, { scope })
 }

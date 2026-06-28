@@ -17,8 +17,8 @@
  * Gated by `ai-credentials-never-leak.test.ts` (Phase 1).
  */
 
-import { nanoid } from 'nanoid'
 import type { DbClient } from '../../db/client'
+import { api, getConvex } from '../../convex/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import {
   decryptSecret,
@@ -76,6 +76,33 @@ function rowToRecord(row: CredentialRow): CredentialRecord {
 }
 
 /**
+ * The credential row as it arrives from `convex/aiCredentials.ts`: identical to
+ * `CredentialRow` except the AES-GCM `ciphertext` / `iv` blobs travel as base64
+ * strings (Convex stores them base64-encoded, §6) rather than `Uint8Array`s.
+ * The master key never reaches the Convex V8 runtime — all crypto stays here.
+ */
+type ConvexCredentialRow = Omit<CredentialRow, 'ciphertext' | 'iv'> & {
+  ciphertext: string | null
+  iv: string | null
+}
+
+function decodeBytes(value: string | null): Uint8Array | null {
+  return value === null ? null : new Uint8Array(Buffer.from(value, 'base64'))
+}
+
+function encodeBytes(bytes: Uint8Array | null): string | null {
+  return bytes === null ? null : Buffer.from(bytes).toString('base64')
+}
+
+function wireToRecord(row: ConvexCredentialRow): CredentialRecord {
+  return rowToRecord({
+    ...row,
+    ciphertext: decodeBytes(row.ciphertext),
+    iv: decodeBytes(row.iv),
+  })
+}
+
+/**
  * Project a CredentialRecord to its wire-safe view. This function — and only
  * this function — is allowed to cross the HTTP boundary with credential
  * data. The `ai-credentials-never-leak.test.ts` gate scans handlers to
@@ -129,19 +156,11 @@ export class CredentialError extends Error {
  * breaks the JSON-schema parse on the client.
  */
 export async function listCredentialsForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
 ): Promise<CredentialRecord[]> {
-  const { rows } = await db<CredentialRow>`
-    select id, user_id, provider_id, auth_mode, display_label,
-           ciphertext, iv, base_url, key_fingerprint,
-           created_at, updated_at, last_used_at
-    from ai_provider_credentials
-    where user_id = ${userId}
-      and auth_mode in ('apiKey', 'baseUrl')
-    order by created_at desc
-  `
-  return rows.map(rowToRecord)
+  const rows = await getConvex().query(api.aiCredentials.listForUser, { userId })
+  return rows.map(wireToRecord)
 }
 
 /**
@@ -150,19 +169,15 @@ export async function listCredentialsForUser(
  * user — handlers should treat both as 404.
  */
 export async function readCredentialForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   credentialId: string,
 ): Promise<CredentialRecord | null> {
-  const { rows } = await db<CredentialRow>`
-    select id, user_id, provider_id, auth_mode, display_label,
-           ciphertext, iv, base_url, key_fingerprint,
-           created_at, updated_at, last_used_at
-    from ai_provider_credentials
-    where id = ${credentialId} and user_id = ${userId}
-    limit 1
-  `
-  return rows[0] ? rowToRecord(rows[0]) : null
+  const row = await getConvex().query(api.aiCredentials.readForUser, {
+    userId,
+    credentialId,
+  })
+  return row ? wireToRecord(row) : null
 }
 
 /**
@@ -237,11 +252,10 @@ export async function resolveCredentialForDriver(
  *   - missing url for 'baseUrl' mode — surfaced as 400
  */
 export async function createCredentialForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   input: CreateCredentialInput,
 ): Promise<CredentialRecord> {
-  const id = nanoid()
   let encrypted: EncryptedSecret | null
   let fingerprint: string | null
   try {
@@ -256,33 +270,23 @@ export async function createCredentialForUser(
   const baseUrl =
     input.authMode === 'baseUrl' ? input.baseUrl : null
 
-  try {
-    const { rows } = await db<CredentialRow>`
-      insert into ai_provider_credentials (
-        id, user_id, provider_id, auth_mode, display_label,
-        ciphertext, iv, base_url, key_fingerprint
-      )
-      values (
-        ${id}, ${userId}, ${input.providerId}, ${input.authMode}, ${input.displayLabel},
-        ${encrypted?.ciphertext ?? null},
-        ${encrypted?.iv ?? null},
-        ${baseUrl},
-        ${fingerprint}
-      )
-      returning id, user_id, provider_id, auth_mode, display_label,
-                ciphertext, iv, base_url, key_fingerprint,
-                created_at, updated_at, last_used_at
-    `
-    return rowToRecord(rows[0]!)
-  } catch (err) {
-    if (isUniqueViolation(err)) {
-      throw new CredentialError(
-        `A credential named "${input.displayLabel}" already exists for this provider.`,
-        409,
-      )
-    }
-    throw err
+  const result = await getConvex().mutation(api.aiCredentials.create, {
+    userId,
+    providerId: input.providerId,
+    authMode: input.authMode,
+    displayLabel: input.displayLabel,
+    ciphertext: encodeBytes(encrypted?.ciphertext ?? null),
+    iv: encodeBytes(encrypted?.iv ?? null),
+    baseUrl,
+    keyFingerprint: fingerprint,
+  })
+  if (!result.ok) {
+    throw new CredentialError(
+      `A credential named "${input.displayLabel}" already exists for this provider.`,
+      409,
+    )
   }
+  return wireToRecord(result.row)
 }
 
 async function maybeEncryptForInput(
@@ -308,12 +312,12 @@ async function encryptKey(plaintext: string): Promise<EncryptedSecret> {
  * different user.
  */
 export async function updateCredentialForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   credentialId: string,
   patch: UpdateCredentialInput,
 ): Promise<CredentialRecord | null> {
-  const existing = await readCredentialForUser(db, userId, credentialId)
+  const existing = await readCredentialForUser(_db, userId, credentialId)
   if (!existing) return null
 
   const nextLabel = patch.displayLabel ?? existing.displayLabel
@@ -350,30 +354,23 @@ export async function updateCredentialForUser(
     }
   }
 
-  try {
-    const { rows } = await db<CredentialRow>`
-      update ai_provider_credentials
-      set display_label = ${nextLabel},
-          ciphertext = ${nextCiphertext},
-          iv = ${nextIv},
-          base_url = ${nextBaseUrl},
-          key_fingerprint = ${nextFingerprint},
-          updated_at = current_timestamp
-      where id = ${credentialId} and user_id = ${userId}
-      returning id, user_id, provider_id, auth_mode, display_label,
-                ciphertext, iv, base_url, key_fingerprint,
-                created_at, updated_at, last_used_at
-    `
-    return rows[0] ? rowToRecord(rows[0]) : null
-  } catch (err) {
-    if (isUniqueViolation(err)) {
-      throw new CredentialError(
-        `A credential named "${nextLabel}" already exists for this provider.`,
-        409,
-      )
-    }
-    throw err
+  const result = await getConvex().mutation(api.aiCredentials.update, {
+    userId,
+    credentialId,
+    displayLabel: nextLabel,
+    ciphertext: encodeBytes(nextCiphertext),
+    iv: encodeBytes(nextIv),
+    baseUrl: nextBaseUrl,
+    keyFingerprint: nextFingerprint,
+  })
+  if (!result.ok) {
+    if (result.reason === 'not_found') return null
+    throw new CredentialError(
+      `A credential named "${nextLabel}" already exists for this provider.`,
+      409,
+    )
   }
+  return wireToRecord(result.row)
 }
 
 /**
@@ -383,25 +380,24 @@ export async function updateCredentialForUser(
  * Returns true when a row was deleted, false otherwise (404).
  */
 export async function deleteCredentialForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   credentialId: string,
 ): Promise<boolean> {
-  try {
-    const result = await db`
-      delete from ai_provider_credentials
-      where id = ${credentialId} and user_id = ${userId}
-    `
-    return result.rowCount > 0
-  } catch (err) {
-    if (isFkViolation(err)) {
-      throw new CredentialError(
-        'This credential is currently set as a default — change the default in /admin/ai/defaults before deleting.',
-        409,
-      )
-    }
-    throw err
+  // The SQL FK `on delete restrict` on `ai_defaults` is replaced by an explicit
+  // reference check inside the mutation (§4.x): a referenced credential returns
+  // `'in_use'`, which we surface as the same 409 the FK violation produced.
+  const result = await getConvex().mutation(api.aiCredentials.remove, {
+    userId,
+    credentialId,
+  })
+  if (result === 'in_use') {
+    throw new CredentialError(
+      'This credential is currently set as a default — change the default in /admin/ai/defaults before deleting.',
+      409,
+    )
   }
+  return result === 'deleted'
 }
 
 /**
@@ -411,34 +407,15 @@ export async function deleteCredentialForUser(
  * Best-effort: no error if the row vanishes mid-stream (cleanup race).
  */
 export async function touchCredentialLastUsed(
-  db: DbClient,
+  _db: DbClient,
   credentialId: string,
 ): Promise<void> {
-  await db`
-    update ai_provider_credentials
-    set last_used_at = current_timestamp
-    where id = ${credentialId}
-  `
+  await getConvex().mutation(api.aiCredentials.touchLastUsed, { credentialId })
 }
 
 // ---------------------------------------------------------------------------
 // Internals — error classification
 // ---------------------------------------------------------------------------
-
-function isUniqueViolation(err: unknown): boolean {
-  // PG sqlstate 23505 + SQLite "UNIQUE constraint failed". Match on message
-  // text to stay dialect-agnostic — repositories shouldn't import driver
-  // error classes.
-  if (!(err instanceof Error)) return false
-  const msg = err.message.toLowerCase()
-  return msg.includes('unique') || msg.includes('23505') || msg.includes('duplicate')
-}
-
-function isFkViolation(err: unknown): boolean {
-  if (!(err instanceof Error)) return false
-  const msg = err.message.toLowerCase()
-  return msg.includes('foreign key') || msg.includes('23503') || msg.includes('fk_')
-}
 
 function credentialEncryptionConfigurationError(
   err: MasterKeyConfigurationError,

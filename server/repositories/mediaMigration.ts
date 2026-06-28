@@ -26,22 +26,7 @@
 
 import type { DbClient } from '../db/client'
 import type { MediaVariant } from './media'
-
-interface PendingOriginalRow {
-  id: string
-  filename: string
-  mime_type: string
-  size_bytes: number | string
-  storage_path: string
-  public_path: string
-  storage_adapter_id: string
-}
-
-interface PendingVariantContainerRow {
-  id: string
-  storage_path: string
-  variants_json: unknown
-}
+import { api, getConvex } from '../convex/client'
 
 export interface PendingOriginal {
   id: string
@@ -127,31 +112,21 @@ interface MigrationBacklog {
  * why avatar/font/plugin-pack are out of scope for now.
  */
 export async function countMigrationBacklog(
-  db: DbClient,
+  _db: DbClient,
   targets: { original: string; variant: string },
 ): Promise<MigrationBacklog> {
-  // Originals — single COUNT query, exact total.
-  const { rows: originalRows } = await db<{ n: number | string }>`
-    select count(*) as n
-    from media_assets
-    where storage_adapter_id <> ${targets.original}
-      and deleted_at is null
-  `
-  const originals = Number(originalRows[0]?.n ?? 0)
-
-  // Variants — pull every variants_json that has at least one non-target
-  // entry. `variants_json` is a JSON column with no per-engine query
-  // operators we can portably rely on (jsonb in PG, text in SQLite), so
-  // we filter JS-side after a coarse `is not null` predicate.
-  const { rows: variantRows } = await db<{ variants_json: unknown }>`
-    select variants_json
-    from media_assets
-    where deleted_at is null
-      and variants_json is not null
-  `
+  // The Convex query returns the exact originals count plus every non-deleted
+  // row's (non-empty) `variants_json` blob — exactly the data the SQL `select
+  // variants_json …` pulled JS-side (`variants_json` is an opaque JSON string;
+  // there is no per-variant DB row to count). We parse + count here with the
+  // pure parser so the variant-entry semantics stay on the Bun side.
+  const { originals, variantsJsons } = await getConvex().query(
+    api.media.migrationBacklogData,
+    { originalTarget: targets.original },
+  )
   let variants = 0
-  for (const row of variantRows) {
-    const list = parseVariantsFromJson(row.variants_json)
+  for (const json of variantsJsons) {
+    const list = parseVariantsFromJson(json)
     for (const v of list) {
       if (v.storageAdapterId !== targets.variant) variants += 1
     }
@@ -166,32 +141,18 @@ export async function countMigrationBacklog(
 const PAGE_LIMIT = 50
 
 export async function listPendingOriginals(
-  db: DbClient,
+  _db: DbClient,
   targetAdapterId: string,
   cursor: string | null,
 ): Promise<{ items: PendingOriginal[]; nextCursor: string | null }> {
-  // Cursor pagination keyed on id (lexicographic). Stable across DB
-  // engines and immune to "new row inserted during migration" pagination
-  // skips that OFFSET-based queries suffer from.
-  const { rows } = cursor
-    ? await db<PendingOriginalRow>`
-        select id, filename, mime_type, size_bytes, storage_path, public_path, storage_adapter_id
-        from media_assets
-        where storage_adapter_id <> ${targetAdapterId}
-          and deleted_at is null
-          and id > ${cursor}
-        order by id asc
-        limit ${PAGE_LIMIT}
-      `
-    : await db<PendingOriginalRow>`
-        select id, filename, mime_type, size_bytes, storage_path, public_path, storage_adapter_id
-        from media_assets
-        where storage_adapter_id <> ${targetAdapterId}
-          and deleted_at is null
-        order by id asc
-        limit ${PAGE_LIMIT}
-      `
-
+  // Cursor pagination keyed on id (lexicographic, the `by_app_id` range). Stable
+  // and immune to "new row inserted during migration" skips that OFFSET-based
+  // queries suffer from.
+  const rows = await getConvex().query(api.media.listPendingOriginals, {
+    targetAdapterId,
+    cursor,
+    limit: PAGE_LIMIT,
+  })
   const items: PendingOriginal[] = rows.map((row) => ({
     id: row.id,
     filename: row.filename,
@@ -206,28 +167,17 @@ export async function listPendingOriginals(
 }
 
 export async function listAssetsWithPendingVariants(
-  db: DbClient,
+  _db: DbClient,
   targetAdapterId: string,
   cursor: string | null,
 ): Promise<{ items: PendingVariantContainer[]; nextCursor: string | null }> {
-  const { rows } = cursor
-    ? await db<PendingVariantContainerRow>`
-        select id, storage_path, variants_json
-        from media_assets
-        where deleted_at is null
-          and variants_json is not null
-          and id > ${cursor}
-        order by id asc
-        limit ${PAGE_LIMIT}
-      `
-    : await db<PendingVariantContainerRow>`
-        select id, storage_path, variants_json
-        from media_assets
-        where deleted_at is null
-          and variants_json is not null
-        order by id asc
-        limit ${PAGE_LIMIT}
-      `
+  // The Convex query returns the raw scanned page (non-deleted rows that have a
+  // non-empty `variants_json`, ordered by id). We parse + filter here so the
+  // variant-entry semantics stay on the Bun side.
+  const rows = await getConvex().query(api.media.listAssetsWithPendingVariants, {
+    cursor,
+    limit: PAGE_LIMIT,
+  })
 
   const items: PendingVariantContainer[] = []
   for (const row of rows) {
@@ -258,7 +208,7 @@ export async function listAssetsWithPendingVariants(
  * because migration preserves the actual content.
  */
 export async function updateAssetStorageLocation(
-  db: DbClient,
+  _db: DbClient,
   id: string,
   input: {
     storagePath: string
@@ -267,14 +217,13 @@ export async function updateAssetStorageLocation(
     externallyHosted: boolean
   },
 ): Promise<void> {
-  await db`
-    update media_assets set
-      storage_path = ${input.storagePath},
-      public_path = ${input.publicPath},
-      storage_adapter_id = ${input.storageAdapterId},
-      externally_hosted = ${input.externallyHosted}
-    where id = ${id}
-  `
+  await getConvex().mutation(api.media.updateAssetStorageLocation, {
+    id,
+    storagePath: input.storagePath,
+    publicPath: input.publicPath,
+    storageAdapterId: input.storageAdapterId,
+    externallyHosted: input.externallyHosted,
+  })
 }
 
 /**
@@ -289,7 +238,7 @@ export async function updateAssetStorageLocation(
  * migration run picks the new shape up.
  */
 export async function updateVariantStorageLocation(
-  db: DbClient,
+  _db: DbClient,
   assetId: string,
   oldPath: string,
   next: {
@@ -299,30 +248,16 @@ export async function updateVariantStorageLocation(
     sizeBytes: number
   },
 ): Promise<boolean> {
-  return db.transaction(async (tx) => {
-    const { rows } = await tx<{ variants_json: unknown }>`
-      select variants_json from media_assets where id = ${assetId}
-    `
-    if (rows.length === 0) return false
-    const variants = parseVariantsFromJson(rows[0].variants_json)
-    let updated = false
-    const rewritten = variants.map((v) => {
-      if (v.path !== oldPath) return v
-      updated = true
-      return {
-        ...v,
-        path: next.path,
-        storagePath: next.storagePath,
-        storageAdapterId: next.storageAdapterId,
-        sizeBytes: next.sizeBytes,
-      }
-    })
-    if (!updated) return false
-    await tx`
-      update media_assets
-      set variants_json = ${rewritten}
-      where id = ${assetId}
-    `
-    return true
+  // The read-parse-mutate-write is ONE atomic Convex mutation (the SQL
+  // transaction, docs/CONVEX-MIGRATION.md §3 #18). The variant entry is matched
+  // on its OLD `path` so a concurrent re-migration isn't clobbered; a miss
+  // leaves the blob untouched.
+  return getConvex().mutation(api.media.updateVariantStorageLocation, {
+    assetId,
+    oldPath,
+    path: next.path,
+    storagePath: next.storagePath,
+    storageAdapterId: next.storageAdapterId,
+    sizeBytes: next.sizeBytes,
   })
 }

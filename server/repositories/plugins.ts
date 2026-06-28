@@ -1,3 +1,28 @@
+/**
+ * Plugins repository — `installed_plugins`, `plugin_records`, and
+ * `plugin_crash_events`.
+ *
+ * Convex port: the read/write bodies are thin adapters over `convex/plugins.ts`
+ * (docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
+ * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
+ * so handlers keep calling these unchanged until `server/db/*` is retired (§7).
+ *
+ * What stays here, on the Bun side:
+ * - **The manifest/settings mappers** (`mapInstalledPlugin`,
+ *   `mergeSettingsWithDefaults`, `mapPluginRecord`, `mapPluginCrashEvent`) — the
+ *   Convex functions return raw rows with `*_json` as opaque strings; these
+ *   parse + validate (via `@core/plugins` TypeBox) the way the SQLite adapter's
+ *   auto-parse used to.
+ * - **The storage operator-DSL field-name guard** (`FIELD_KEY_RE`) — validated
+ *   here so an invalid filter/orderBy key raises the same `[plugin:storage]`
+ *   error before the (JS-side) Convex filter runs.
+ * - **Secret handling** is delegated to `pluginSecrets.ts` (crypto is Bun-side):
+ *   `installPlugin` seeds secret defaults and `setPluginSettings` splits the
+ *   encrypted fields out before persisting `settings_json`.
+ *
+ * @see convex/plugins.ts          — the Convex query/mutation functions
+ * @see server/repositories/pluginSecrets.ts — the Bun-side secret crypto
+ */
 import type {
   InstalledPlugin,
   PluginLifecycleStatus,
@@ -12,11 +37,11 @@ import {
   applyPluginSecretSettings,
   seedPluginSecretDefaults,
 } from './pluginSecrets'
-import type { StorageListOptions, StorageFilterOperator } from '@core/plugin-sdk/storageSchemas'
+import type { StorageListOptions } from '@core/plugin-sdk/storageSchemas'
 import { parsePluginManifest } from '@core/plugins/manifest'
-import type { DbClient, Dialect } from '../db/client'
+import type { DbClient } from '../db/client'
 import { isoDate } from '@core/utils/isoDate'
-import { jsonField } from '../db/jsonExtract'
+import { api, getConvex } from '../convex/client'
 
 /**
  * Discriminated union returned by every repository function that reads an
@@ -168,28 +193,18 @@ function mapPluginRecord(row: PluginRecordRow): PluginRecord {
   }
 }
 
-export async function listInstalledPlugins(db: DbClient): Promise<InstalledPluginResult[]> {
-  const { rows } = await db<InstalledPluginRow>`
-    select id, name, version, enabled, lifecycle_status, last_error,
-           granted_permissions_json, manifest_json, settings_json, installed_at, updated_at
-    from installed_plugins
-    order by installed_at desc
-  `
+export async function listInstalledPlugins(_db: DbClient): Promise<InstalledPluginResult[]> {
+  const rows = await getConvex().query(api.plugins.listInstalled, {})
   return rows.map(mapInstalledPlugin)
 }
 
-export async function getInstalledPlugin(db: DbClient, id: string): Promise<InstalledPluginResult | null> {
-  const { rows } = await db<InstalledPluginRow>`
-    select id, name, version, enabled, lifecycle_status, last_error,
-           granted_permissions_json, manifest_json, settings_json, installed_at, updated_at
-    from installed_plugins
-    where id = ${id}
-  `
-  return rows[0] ? mapInstalledPlugin(rows[0]) : null
+export async function getInstalledPlugin(_db: DbClient, id: string): Promise<InstalledPluginResult | null> {
+  const row = await getConvex().query(api.plugins.getInstalled, { id })
+  return row ? mapInstalledPlugin(row) : null
 }
 
 export async function installPlugin(
-  db: DbClient,
+  _db: DbClient,
   manifest: PluginManifest,
   grantedPermissions: PluginPermission[] = manifest.grantedPermissions ?? [],
 ): Promise<InstalledPlugin> {
@@ -203,26 +218,23 @@ export async function installPlugin(
   const initialSettings = Object.fromEntries(
     Object.entries(pluginSettingsDefaults(declared)).filter(([key]) => !secretIds.has(key)),
   )
-  const { rows } = await db<InstalledPluginRow>`
-    insert into installed_plugins (id, name, version, manifest_json, granted_permissions_json, settings_json, enabled, lifecycle_status, last_error)
-    values (${manifest.id}, ${manifest.name}, ${manifest.version}, ${writeJson(manifestToStore)}, ${writeJson(grantedPermissions)}, ${writeJson(initialSettings)}, true, 'installed', null)
-    on conflict (id) do update
-      set name = excluded.name,
-          version = excluded.version,
-          manifest_json = excluded.manifest_json,
-          granted_permissions_json = excluded.granted_permissions_json,
-          enabled = true,
-          lifecycle_status = 'installed',
-          last_error = null,
-          updated_at = current_timestamp
-    returning id, name, version, enabled, lifecycle_status, last_error,
-              granted_permissions_json, manifest_json, settings_json, installed_at, updated_at
-  `
+  // The installed_plugins upsert (on conflict do update — settings_json is
+  // preserved on the update path) lives in the Convex mutation; the encrypted
+  // secret seed runs Bun-side around it (crypto can't cross into Convex), as
+  // the SQL path also ran the seed as a separate statement.
+  const row = await getConvex().mutation(api.plugins.install, {
+    id: manifest.id,
+    name: manifest.name,
+    version: manifest.version,
+    manifestJson: writeJson(manifestToStore),
+    grantedPermissionsJson: writeJson(grantedPermissions),
+    settingsJson: writeJson(initialSettings),
+  })
   // Secret settings with a non-empty manifest default get an encrypted row.
   // Insert-if-absent: the upgrade/rollback flows reuse this upsert and must
   // never clobber a secret the site owner has since rotated.
-  await seedPluginSecretDefaults(db, manifest.id, declared)
-  const result = mapInstalledPlugin(rows[0])
+  await seedPluginSecretDefaults(_db, manifest.id, declared)
+  const result = mapInstalledPlugin(row)
   // installPlugin is always called with a freshly-validated manifest — a
   // broken result here indicates a serialisation invariant violation.
   if (result.kind !== 'ok') {
@@ -232,37 +244,30 @@ export async function installPlugin(
 }
 
 export async function setPluginEnabled(
-  db: DbClient,
+  _db: DbClient,
   id: string,
   enabled: boolean,
 ): Promise<InstalledPluginResult | null> {
-  const { rows } = await db<InstalledPluginRow>`
-    update installed_plugins set enabled = ${enabled}, updated_at = current_timestamp
-    where id = ${id}
-    returning id, name, version, enabled, lifecycle_status, last_error,
-              granted_permissions_json, manifest_json, settings_json, installed_at, updated_at
-  `
-  return rows[0] ? mapInstalledPlugin(rows[0]) : null
+  const row = await getConvex().mutation(api.plugins.setEnabled, { id, enabled })
+  return row ? mapInstalledPlugin(row) : null
 }
 
 export async function setPluginLifecycleStatus(
-  db: DbClient,
+  _db: DbClient,
   id: string,
   lifecycleStatus: PluginLifecycleStatus,
   lastError: string | null = null,
 ): Promise<InstalledPluginResult | null> {
-  const { rows } = await db<InstalledPluginRow>`
-    update installed_plugins set lifecycle_status = ${lifecycleStatus}, last_error = ${lastError}, updated_at = current_timestamp
-    where id = ${id}
-    returning id, name, version, enabled, lifecycle_status, last_error,
-              granted_permissions_json, manifest_json, settings_json, installed_at, updated_at
-  `
-  return rows[0] ? mapInstalledPlugin(rows[0]) : null
+  const row = await getConvex().mutation(api.plugins.setLifecycleStatus, {
+    id,
+    lifecycleStatus,
+    lastError,
+  })
+  return row ? mapInstalledPlugin(row) : null
 }
 
-export async function deletePlugin(db: DbClient, id: string): Promise<boolean> {
-  const { rowCount } = await db`delete from installed_plugins where id = ${id}`
-  return rowCount > 0
+export async function deletePlugin(_db: DbClient, id: string): Promise<boolean> {
+  return getConvex().mutation(api.plugins.deletePlugin, { id })
 }
 
 /**
@@ -275,152 +280,69 @@ export async function deletePlugin(db: DbClient, id: string): Promise<boolean> {
  * Throws `PluginSecretError` when secret encryption is misconfigured.
  */
 export async function setPluginSettings(
-  db: DbClient,
+  _db: DbClient,
   id: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
   settings: PluginSettingsValues,
 ): Promise<InstalledPluginResult | null> {
-  const plainSettings = await applyPluginSecretSettings(db, id, declared, settings)
-  const { rows } = await db<InstalledPluginRow>`
-    update installed_plugins
-       set settings_json = ${writeJson(plainSettings)},
-           updated_at = current_timestamp
-     where id = ${id}
-    returning id, name, version, enabled, lifecycle_status, last_error,
-              granted_permissions_json, manifest_json, settings_json, installed_at, updated_at
-  `
-  return rows[0] ? mapInstalledPlugin(rows[0]) : null
+  const plainSettings = await applyPluginSecretSettings(_db, id, declared, settings)
+  const row = await getConvex().mutation(api.plugins.setSettings, {
+    id,
+    settingsJson: writeJson(plainSettings),
+  })
+  return row ? mapInstalledPlugin(row) : null
 }
 
-/** Identifier regex — same rule as the jsonField() helper. */
+/**
+ * Identifier regex for storage filter/orderBy field names. The SQL path used it
+ * to gate `json_extract` path building; the Convex path applies the
+ * operator-DSL in JS, but we keep the guard here so an invalid key still raises
+ * the same `[plugin:storage]` error before the query runs.
+ */
 const FIELD_KEY_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
-/** Build a dialect-appropriate positional parameter placeholder. */
-function placeholder(dialect: Dialect, index: number): string {
-  return dialect === 'postgres' ? `$${index}` : '?'
-}
-
 export async function listPluginRecords(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   resourceId: string,
   options: StorageListOptions = {},
 ): Promise<{ records: PluginRecord[]; totalCount: number }> {
   const { filter, orderBy, limit = 100, offset = 0 } = options
 
-  const params: unknown[] = [pluginId, resourceId]
-  let paramIdx = 2
-
-  // Returns the next positional placeholder AND appends the value to params.
-  function addParam(value: unknown): string {
-    params.push(value)
-    paramIdx++
-    return placeholder(db.dialect, paramIdx)
-  }
-
-  // --- WHERE clause ---
-  let whereSql = `plugin_id = ${placeholder(db.dialect, 1)} and resource_id = ${placeholder(db.dialect, 2)}`
-
+  // Field-name validation stays Bun-side so the error surfaces identically; the
+  // operator matching + ordering + paging run JS-side inside the Convex query
+  // (no json_extract — docs/CONVEX-MIGRATION.md §4.2).
   if (filter) {
-    for (const [key, value] of Object.entries(filter)) {
+    for (const key of Object.keys(filter)) {
       if (!FIELD_KEY_RE.test(key)) {
         throw new Error(`[plugin:storage] invalid filter field name: ${JSON.stringify(key)}`)
       }
-      const fragment = jsonField('data_json', key, db.dialect).sql
-
-      if (value === null || typeof value !== 'object') {
-        // Shorthand primitive — treat as eq
-        whereSql += ` and ${fragment} = ${addParam(value)}`
-      } else {
-        // Full operator object
-        const op = value as StorageFilterOperator
-        if (op.eq !== undefined) {
-          whereSql += ` and ${fragment} = ${addParam(op.eq)}`
-        }
-        if (op.ne !== undefined) {
-          whereSql += ` and ${fragment} != ${addParam(op.ne)}`
-        }
-        if (op.gt !== undefined) {
-          whereSql += ` and ${fragment} > ${addParam(op.gt)}`
-        }
-        if (op.gte !== undefined) {
-          whereSql += ` and ${fragment} >= ${addParam(op.gte)}`
-        }
-        if (op.lt !== undefined) {
-          whereSql += ` and ${fragment} < ${addParam(op.lt)}`
-        }
-        if (op.lte !== undefined) {
-          whereSql += ` and ${fragment} <= ${addParam(op.lte)}`
-        }
-        if (op.in !== undefined) {
-          if (op.in.length === 0) {
-            // Empty IN list — no rows can ever match
-            whereSql += ` and 1=0`
-          } else {
-            const inPlaceholders: string[] = op.in.map((v) => addParam(v))
-            whereSql += ` and ${fragment} in (${inPlaceholders.join(', ')})`
-          }
-        }
-        if (op.like !== undefined) {
-          whereSql += ` and lower(${fragment}) like lower(${addParam(op.like)})`
-        }
-      }
     }
   }
-
-  // Snapshot how many params the WHERE clause uses (for count query).
-  const countParamCount = params.length
-
-  // --- ORDER BY clause ---
-  let orderBySql = 'created_at desc'
-  if (orderBy && Object.keys(orderBy).length > 0) {
-    const parts: string[] = []
-    for (const [key, dir] of Object.entries(orderBy)) {
+  if (orderBy) {
+    for (const key of Object.keys(orderBy)) {
       if (!FIELD_KEY_RE.test(key)) {
         throw new Error(`[plugin:storage] invalid orderBy field name: ${JSON.stringify(key)}`)
       }
-      const fragment = jsonField('data_json', key, db.dialect).sql
-      parts.push(`${fragment} ${dir}`)
     }
-    orderBySql = parts.join(', ')
   }
 
-  // --- LIMIT / OFFSET (appended after count params are captured) ---
-  const limitPlaceholder = addParam(limit)
-  const offsetPlaceholder = addParam(offset)
-
-  const dataSql = `
-    select id, plugin_id, resource_id, data_json, created_at, updated_at
-    from plugin_records
-    where ${whereSql}
-    order by ${orderBySql}
-    limit ${limitPlaceholder} offset ${offsetPlaceholder}
-  `
-
-  const countSql = `
-    select count(*) as total
-    from plugin_records
-    where ${whereSql}
-  `
-
-  const dataParams = params
-  const countParams = params.slice(0, countParamCount)
-
-  const [dataResult, countResult] = await Promise.all([
-    db.unsafe<PluginRecordRow>(dataSql, dataParams),
-    db.unsafe<{ total: number | bigint | string }>(countSql, countParams),
-  ])
-
-  const totalCount = Number(countResult.rows[0]?.total ?? 0)
-
+  const result = await getConvex().query(api.plugins.listRecords, {
+    pluginId,
+    resourceId,
+    filter,
+    orderBy,
+    limit,
+    offset,
+  })
   return {
-    records: dataResult.rows.map(mapPluginRecord),
-    totalCount,
+    records: result.records.map(mapPluginRecord),
+    totalCount: result.totalCount,
   }
 }
 
 export async function createPluginRecord(
-  db: DbClient,
+  _db: DbClient,
   input: {
     id: string
     pluginId: string
@@ -428,16 +350,17 @@ export async function createPluginRecord(
     data: Record<string, unknown>
   },
 ): Promise<PluginRecord> {
-  const { rows } = await db<PluginRecordRow>`
-    insert into plugin_records (id, plugin_id, resource_id, data_json)
-    values (${input.id}, ${input.pluginId}, ${input.resourceId}, ${writeJson(input.data)})
-    returning id, plugin_id, resource_id, data_json, created_at, updated_at
-  `
-  return mapPluginRecord(rows[0])
+  const row = await getConvex().mutation(api.plugins.createRecord, {
+    id: input.id,
+    pluginId: input.pluginId,
+    resourceId: input.resourceId,
+    dataJson: writeJson(input.data),
+  })
+  return mapPluginRecord(row)
 }
 
 export async function updatePluginRecord(
-  db: DbClient,
+  _db: DbClient,
   input: {
     id: string
     pluginId: string
@@ -445,23 +368,24 @@ export async function updatePluginRecord(
     data: Record<string, unknown>
   },
 ): Promise<PluginRecord | null> {
-  const { rows } = await db<PluginRecordRow>`
-    update plugin_records set data_json = ${writeJson(input.data)}, updated_at = current_timestamp
-    where id = ${input.id} and plugin_id = ${input.pluginId} and resource_id = ${input.resourceId}
-    returning id, plugin_id, resource_id, data_json, created_at, updated_at
-  `
-  return rows[0] ? mapPluginRecord(rows[0]) : null
+  const row = await getConvex().mutation(api.plugins.updateRecord, {
+    id: input.id,
+    pluginId: input.pluginId,
+    resourceId: input.resourceId,
+    dataJson: writeJson(input.data),
+  })
+  return row ? mapPluginRecord(row) : null
 }
 
 export async function deletePluginRecord(
-  db: DbClient,
+  _db: DbClient,
   input: { id: string; pluginId: string; resourceId: string },
 ): Promise<boolean> {
-  const { rowCount } = await db`
-    delete from plugin_records
-    where id = ${input.id} and plugin_id = ${input.pluginId} and resource_id = ${input.resourceId}
-  `
-  return rowCount > 0
+  return getConvex().mutation(api.plugins.deleteRecord, {
+    id: input.id,
+    pluginId: input.pluginId,
+    resourceId: input.resourceId,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -499,50 +423,32 @@ function mapPluginCrashEvent(row: PluginCrashEventRow): PluginCrashEvent {
   }
 }
 
-/** Insert a new crash event row + prune older rows past the cap. */
+/** Insert a new crash event row + prune older rows past the cap (one atomic mutation). */
 export async function recordPluginCrash(
-  db: DbClient,
+  _db: DbClient,
   input: { id: string; pluginId: string; reason: string; stack?: string | null },
 ): Promise<PluginCrashEvent> {
-  const { rows } = await db<PluginCrashEventRow>`
-    insert into plugin_crash_events (id, plugin_id, reason, stack)
-    values (${input.id}, ${input.pluginId}, ${input.reason}, ${input.stack ?? null})
-    returning id, plugin_id, occurred_at, reason, stack
-  `
-
-  // Roll the window — keep only the N most recent events for this plugin.
-  // Done as a separate statement (not a CTE) to stay dialect-naive: ANSI
-  // SQL guarantees this works on both PG and SQLite.
-  await db`
-    delete from plugin_crash_events
-    where plugin_id = ${input.pluginId}
-      and id not in (
-        select id from plugin_crash_events
-        where plugin_id = ${input.pluginId}
-        order by occurred_at desc
-        limit ${MAX_CRASH_EVENTS_PER_PLUGIN}
-      )
-  `
-  return mapPluginCrashEvent(rows[0])
+  const row = await getConvex().mutation(api.plugins.recordCrash, {
+    id: input.id,
+    pluginId: input.pluginId,
+    reason: input.reason,
+    stack: input.stack ?? null,
+    keep: MAX_CRASH_EVENTS_PER_PLUGIN,
+  })
+  return mapPluginCrashEvent(row)
 }
 
 /** List the most-recent crash events for one plugin, newest first. */
 export async function listPluginCrashes(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   limit = MAX_CRASH_EVENTS_PER_PLUGIN,
 ): Promise<PluginCrashEvent[]> {
-  const { rows } = await db<PluginCrashEventRow>`
-    select id, plugin_id, occurred_at, reason, stack
-    from plugin_crash_events
-    where plugin_id = ${pluginId}
-    order by occurred_at desc
-    limit ${limit}
-  `
+  const rows = await getConvex().query(api.plugins.listCrashes, { pluginId, limit })
   return rows.map(mapPluginCrashEvent)
 }
 
 /** Drop every crash event for a plugin. Called on every uninstall path + on manual restart. */
-export async function clearPluginCrashes(db: DbClient, pluginId: string): Promise<void> {
-  await db`delete from plugin_crash_events where plugin_id = ${pluginId}`
+export async function clearPluginCrashes(_db: DbClient, pluginId: string): Promise<void> {
+  await getConvex().mutation(api.plugins.clearCrashes, { pluginId })
 }

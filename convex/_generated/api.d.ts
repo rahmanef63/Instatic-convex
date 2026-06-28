@@ -14,10 +14,20 @@
  * @module
  */
 
+import type * as aiConversations from "../aiConversations.js";
+import type * as aiCredentials from "../aiCredentials.js";
+import type * as aiDefaults from "../aiDefaults.js";
+import type * as aiPricing from "../aiPricing.js";
 import type * as dataPublish from "../dataPublish.js";
 import type * as dataRows from "../dataRows.js";
 import type * as dataTables from "../dataTables.js";
 import type * as loginAttempts from "../loginAttempts.js";
+import type * as media from "../media.js";
+import type * as mediaFolders from "../mediaFolders.js";
+import type * as mediaStorage from "../mediaStorage.js";
+import type * as pluginSchedules from "../pluginSchedules.js";
+import type * as pluginSecrets from "../pluginSecrets.js";
+import type * as plugins from "../plugins.js";
 import type * as roles from "../roles.js";
 import type * as sessions from "../sessions.js";
 import type * as setup from "../setup.js";
@@ -38,10 +48,20 @@ import type {
  * ```
  */
 declare const fullApi: ApiFromModules<{
+  aiConversations: typeof aiConversations;
+  aiCredentials: typeof aiCredentials;
+  aiDefaults: typeof aiDefaults;
+  aiPricing: typeof aiPricing;
   dataPublish: typeof dataPublish;
   dataRows: typeof dataRows;
   dataTables: typeof dataTables;
   loginAttempts: typeof loginAttempts;
+  media: typeof media;
+  mediaFolders: typeof mediaFolders;
+  mediaStorage: typeof mediaStorage;
+  pluginSchedules: typeof pluginSchedules;
+  pluginSecrets: typeof pluginSecrets;
+  plugins: typeof plugins;
   roles: typeof roles;
   sessions: typeof sessions;
   setup: typeof setup;

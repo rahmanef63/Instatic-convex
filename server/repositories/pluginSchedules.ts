@@ -14,12 +14,22 @@
  *                            ~200 per (plugin_id, schedule_id) — bounded
  *                            growth without TTL infrastructure).
  *
- * Repository functions follow the dialect-naive rules in CLAUDE.md: only
- * ANSI-standard SQL, no `now()` in DML, no `::int` / `::jsonb` casts, no
- * `distinct on`, no `any($N::...)`. The architecture gate
- * `db-postgres-isms.test.ts` enforces this.
+ * Convex port: the read/write bodies are thin adapters over
+ * `convex/pluginSchedules.ts` (docs/CONVEX-MIGRATION.md §2). The exported
+ * signatures are frozen — the leading SQL `DbClient` handle is retained (named
+ * `_db`, intentionally unused) so the scheduler tick (`server/plugins/
+ * scheduler.ts`) keeps calling these unchanged until `server/db/*` is retired
+ * (§7). The cadence/last-run mappers (`mapSchedule`, `mapRun`) stay here; the
+ * Convex functions return raw rows with `cadence_json` opaque.
+ *
+ * THE HARD CASE (§4.1): the SQL `tryClaimSchedule` advisory-lock-adjacent claim
+ * (a guarded `running_token` flip) becomes the atomic `tryClaim` mutation —
+ * Convex serializability makes it a single-winner claim with no advisory lock.
+ * `selectDueSchedules`'s `join installed_plugins` becomes a per-row index lookup
+ * inside the Convex query. `advisoryLock.ts` is NOT called from here.
  */
 import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 import { isoDate, isoDateOrNull } from '@core/utils/isoDate'
 
 // ---------------------------------------------------------------------------
@@ -203,28 +213,17 @@ interface ScheduleUpsertInput {
  * re-registered during the latest `activate()` pass.
  */
 export async function upsertPluginSchedule(
-  db: DbClient,
+  _db: DbClient,
   input: ScheduleUpsertInput,
 ): Promise<void> {
-  const cadenceJson = JSON.stringify(input.cadence)
-  await db`
-    insert into plugin_schedules (
-      plugin_id, schedule_id, cadence_json, overlap, max_duration_ms,
-      enabled, next_run_at, claimed_at, created_at, updated_at
-    )
-    values (
-      ${input.pluginId}, ${input.scheduleId}, ${cadenceJson}, ${input.overlap}, ${input.maxDurationMs},
-      ${true}, ${input.nextRunAt}, ${new Date().toISOString()}, ${new Date().toISOString()}, ${new Date().toISOString()}
-    )
-    on conflict (plugin_id, schedule_id) do update set
-      cadence_json = excluded.cadence_json,
-      overlap = excluded.overlap,
-      max_duration_ms = excluded.max_duration_ms,
-      enabled = ${true},
-      next_run_at = excluded.next_run_at,
-      claimed_at = excluded.claimed_at,
-      updated_at = excluded.updated_at
-  `
+  await getConvex().mutation(api.pluginSchedules.upsert, {
+    pluginId: input.pluginId,
+    scheduleId: input.scheduleId,
+    cadenceJson: JSON.stringify(input.cadence),
+    overlap: input.overlap,
+    maxDurationMs: input.maxDurationMs,
+    nextRunAt: input.nextRunAt,
+  })
 }
 
 /**
@@ -234,15 +233,11 @@ export async function upsertPluginSchedule(
  * still there.
  */
 export async function disablePluginSchedule(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<void> {
-  await db`
-    update plugin_schedules
-    set enabled = ${false}, updated_at = ${new Date().toISOString()}
-    where plugin_id = ${pluginId} and schedule_id = ${scheduleId}
-  `
+  await getConvex().mutation(api.pluginSchedules.disable, { pluginId, scheduleId })
 }
 
 /**
@@ -256,42 +251,31 @@ export async function disablePluginSchedule(
  * ISO-8601 strings compare correctly as text in both dialects.
  */
 export async function disableSchedulesNotReclaimedSince(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   activationStartedAtIso: string,
 ): Promise<void> {
-  await db`
-    update plugin_schedules
-    set enabled = ${false}, updated_at = ${new Date().toISOString()}
-    where plugin_id = ${pluginId}
-      and enabled = ${true}
-      and (claimed_at is null or claimed_at < ${activationStartedAtIso})
-  `
+  await getConvex().mutation(api.pluginSchedules.disableNotReclaimedSince, {
+    pluginId,
+    activationStartedAtIso,
+  })
 }
 
 export async function listSchedulesForPlugin(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
 ): Promise<PluginSchedule[]> {
-  const { rows } = await db<ScheduleRow>`
-    select * from plugin_schedules
-    where plugin_id = ${pluginId}
-    order by schedule_id asc
-  `
+  const rows = await getConvex().query(api.pluginSchedules.listForPlugin, { pluginId })
   return rows.map(mapSchedule)
 }
 
 export async function getSchedule(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<PluginSchedule | null> {
-  const { rows } = await db<ScheduleRow>`
-    select * from plugin_schedules
-    where plugin_id = ${pluginId} and schedule_id = ${scheduleId}
-    limit 1
-  `
-  return rows[0] ? mapSchedule(rows[0]) : null
+  const row = await getConvex().query(api.pluginSchedules.get, { pluginId, scheduleId })
+  return row ? mapSchedule(row) : null
 }
 
 /**
@@ -306,21 +290,11 @@ export async function getSchedule(
  * would just spawn empty workers that record error runs.
  */
 export async function selectDueSchedules(
-  db: DbClient,
+  _db: DbClient,
   nowIso: string,
   limit: number,
 ): Promise<PluginSchedule[]> {
-  const { rows } = await db<ScheduleRow>`
-    select s.* from plugin_schedules s
-    join installed_plugins p on p.id = s.plugin_id
-    where s.enabled = ${true}
-      and s.paused = ${false}
-      and p.enabled = ${true}
-      and s.next_run_at <= ${nowIso}
-      and (s.lock_until is null or s.lock_until <= ${nowIso})
-    order by s.next_run_at asc
-    limit ${limit}
-  `
+  const rows = await getConvex().query(api.pluginSchedules.selectDue, { nowIso, limit })
   return rows.map(mapSchedule)
 }
 
@@ -342,27 +316,25 @@ export async function selectDueSchedules(
  * a paused schedule so the operator can verify a fix before resuming.
  */
 export async function tryClaimSchedule(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   token: string,
   lockUntilIso: string,
   nowIso: string,
 ): Promise<boolean> {
-  const result = await db`
-    update plugin_schedules
-    set running_token = ${token}, lock_until = ${lockUntilIso}, updated_at = ${nowIso}
-    where plugin_id = ${pluginId}
-      and schedule_id = ${scheduleId}
-      and (running_token is null or (lock_until is not null and lock_until <= ${nowIso}))
-      and enabled = ${true}
-  `
-  return result.rowCount > 0
+  return getConvex().mutation(api.pluginSchedules.tryClaim, {
+    pluginId,
+    scheduleId,
+    token,
+    lockUntilIso,
+    nowIso,
+  })
 }
 
 /** Release the lock and record the run's outcome. Called once per fire. */
 export async function recordScheduleRunOutcome(
-  db: DbClient,
+  _db: DbClient,
   args: {
     pluginId: string
     scheduleId: string
@@ -375,40 +347,17 @@ export async function recordScheduleRunOutcome(
     resetFailures: boolean
   },
 ): Promise<void> {
-  if (args.resetFailures) {
-    await db`
-      update plugin_schedules
-      set running_token = null,
-          lock_until = null,
-          last_run_at = coalesce(last_run_at, ${args.nowIso}),
-          last_finished_at = ${args.nowIso},
-          last_status = ${args.status},
-          last_error = ${args.error},
-          last_duration_ms = ${args.durationMs},
-          next_run_at = ${args.nextRunAt},
-          consecutive_failures = ${0},
-          updated_at = ${args.nowIso}
-      where plugin_id = ${args.pluginId}
-        and schedule_id = ${args.scheduleId}
-        and running_token = ${args.token}
-    `
-    return
-  }
-  await db`
-    update plugin_schedules
-    set running_token = null,
-        lock_until = null,
-        last_finished_at = ${args.nowIso},
-        last_status = ${args.status},
-        last_error = ${args.error},
-        last_duration_ms = ${args.durationMs},
-        next_run_at = ${args.nextRunAt},
-        consecutive_failures = consecutive_failures + ${1},
-        updated_at = ${args.nowIso}
-    where plugin_id = ${args.pluginId}
-      and schedule_id = ${args.scheduleId}
-      and running_token = ${args.token}
-  `
+  await getConvex().mutation(api.pluginSchedules.recordRunOutcome, {
+    pluginId: args.pluginId,
+    scheduleId: args.scheduleId,
+    token: args.token,
+    nowIso: args.nowIso,
+    status: args.status,
+    error: args.error,
+    durationMs: args.durationMs,
+    nextRunAt: args.nextRunAt,
+    resetFailures: args.resetFailures,
+  })
 }
 
 /**
@@ -418,16 +367,16 @@ export async function recordScheduleRunOutcome(
  * for long-running jobs.
  */
 export async function markScheduleRunStarted(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   startedAtIso: string,
 ): Promise<void> {
-  await db`
-    update plugin_schedules
-    set last_run_at = ${startedAtIso}, updated_at = ${startedAtIso}
-    where plugin_id = ${pluginId} and schedule_id = ${scheduleId}
-  `
+  await getConvex().mutation(api.pluginSchedules.markRunStarted, {
+    pluginId,
+    scheduleId,
+    startedAtIso,
+  })
 }
 
 /**
@@ -437,29 +386,21 @@ export async function markScheduleRunStarted(
  * registration upserts never touch `paused`. Cleared by `resumeSchedule`.
  */
 export async function pauseSchedule(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   pausedAtIso: string,
 ): Promise<void> {
-  await db`
-    update plugin_schedules
-    set paused = ${true}, updated_at = ${pausedAtIso}
-    where plugin_id = ${pluginId} and schedule_id = ${scheduleId}
-  `
+  await getConvex().mutation(api.pluginSchedules.pause, { pluginId, scheduleId, pausedAtIso })
 }
 
 /** Clear an operator/failure pause and reset the failure counter. */
 export async function resumeSchedule(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<void> {
-  await db`
-    update plugin_schedules
-    set paused = ${false}, consecutive_failures = ${0}, updated_at = ${new Date().toISOString()}
-    where plugin_id = ${pluginId} and schedule_id = ${scheduleId}
-  `
+  await getConvex().mutation(api.pluginSchedules.resume, { pluginId, scheduleId })
 }
 
 // ---------------------------------------------------------------------------
@@ -467,7 +408,7 @@ export async function resumeSchedule(
 // ---------------------------------------------------------------------------
 
 export async function insertScheduleRun(
-  db: DbClient,
+  _db: DbClient,
   run: {
     id: string
     pluginId: string
@@ -476,43 +417,40 @@ export async function insertScheduleRun(
     triggeredBy: 'tick' | 'run-now'
   },
 ): Promise<void> {
-  await db`
-    insert into plugin_schedule_runs (
-      id, plugin_id, schedule_id, started_at, status, triggered_by
-    )
-    values (
-      ${run.id}, ${run.pluginId}, ${run.scheduleId}, ${run.startedAt}, ${'never_run'}, ${run.triggeredBy}
-    )
-  `
+  await getConvex().mutation(api.pluginSchedules.insertRun, {
+    id: run.id,
+    pluginId: run.pluginId,
+    scheduleId: run.scheduleId,
+    startedAt: run.startedAt,
+    triggeredBy: run.triggeredBy,
+  })
 }
 
 export async function finalizeScheduleRun(
-  db: DbClient,
+  _db: DbClient,
   runId: string,
   outcome: { finishedAt: string; status: ScheduleStatus; error: string | null; durationMs: number },
 ): Promise<void> {
-  await db`
-    update plugin_schedule_runs
-    set finished_at = ${outcome.finishedAt},
-        status = ${outcome.status},
-        error = ${outcome.error},
-        duration_ms = ${outcome.durationMs}
-    where id = ${runId}
-  `
+  await getConvex().mutation(api.pluginSchedules.finalizeRun, {
+    runId,
+    finishedAt: outcome.finishedAt,
+    status: outcome.status,
+    error: outcome.error,
+    durationMs: outcome.durationMs,
+  })
 }
 
 export async function listRecentRuns(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   limit = 20,
 ): Promise<PluginScheduleRun[]> {
-  const { rows } = await db<ScheduleRunRow>`
-    select * from plugin_schedule_runs
-    where plugin_id = ${pluginId} and schedule_id = ${scheduleId}
-    order by started_at desc
-    limit ${limit}
-  `
+  const rows = await getConvex().query(api.pluginSchedules.listRecentRuns, {
+    pluginId,
+    scheduleId,
+    limit,
+  })
   return rows.map(mapRun)
 }
 
@@ -522,26 +460,10 @@ export async function listRecentRuns(
  * to bound storage without blocking the hot path.
  */
 export async function trimScheduleRunHistory(
-  db: DbClient,
+  _db: DbClient,
   keepPerSchedule = 200,
 ): Promise<void> {
-  // Two-step: pick the per-group cutoff timestamp, then delete older rows
-  // within each group. ANSI-standard subquery, dialect-naive — works on
-  // both Postgres and SQLite.
-  await db`
-    delete from plugin_schedule_runs
-    where id in (
-      select r.id from plugin_schedule_runs r
-      where r.started_at < (
-        select min(t.started_at) from (
-          select started_at from plugin_schedule_runs
-          where plugin_id = r.plugin_id and schedule_id = r.schedule_id
-          order by started_at desc
-          limit ${keepPerSchedule}
-        ) t
-      )
-    )
-  `
+  await getConvex().mutation(api.pluginSchedules.trimRunHistory, { keepPerSchedule })
 }
 
 /**
@@ -550,6 +472,6 @@ export async function trimScheduleRunHistory(
  * `plugin_schedules`, which cascades), so without this sweep the history
  * rows would outlive the plugin row forever.
  */
-export async function clearPluginScheduleRuns(db: DbClient, pluginId: string): Promise<void> {
-  await db`delete from plugin_schedule_runs where plugin_id = ${pluginId}`
+export async function clearPluginScheduleRuns(_db: DbClient, pluginId: string): Promise<void> {
+  await getConvex().mutation(api.pluginSchedules.clearRunsForPlugin, { pluginId })
 }

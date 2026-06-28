@@ -8,8 +8,8 @@
  * read can't leak plaintext onto a browser-bound payload by accident.
  *
  * Owns:
- *   - All SQL touching the `plugin_secrets` table.
- *   - Encryption on write + decryption on read.
+ *   - Encryption on write + decryption on read (the process master key — it
+ *     stays Bun-side and NEVER enters the Convex V8 runtime, §6).
  *   - The `'***'` sentinel semantics at the persistence boundary
  *     (`applyPluginSecretSettings`): sentinel preserves the stored row,
  *     a new string rotates it, the empty string deletes it.
@@ -20,10 +20,20 @@
  *   - HTTP semantics (handlers map `PluginSecretError.status` to envelopes).
  *   - The `settings_json` column (`plugins.ts` owns `installed_plugins`).
  *
+ * Convex port: the read/write bodies are thin adapters over
+ * `convex/pluginSecrets.ts` (docs/CONVEX-MIGRATION.md §2). The leading SQL
+ * `DbClient` handle on every exported signature is retained (named `_db`,
+ * intentionally unused) so callers stay unchanged until `server/db/*` is
+ * retired (§7). Crypto runs here; only base64 `ciphertext` / `iv` strings cross
+ * the wire — Convex never sees the master key or plaintext.
+ *
  * Gated by `plugin-secrets-never-leak.test.ts`.
+ *
+ * @see convex/pluginSecrets.ts — the Convex persistence functions
  */
 
 import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 import {
   decryptSecret,
   encryptSecret,
@@ -39,11 +49,14 @@ import {
   type PluginSettingsValues,
 } from '@core/plugin-sdk'
 
-interface PluginSecretRow {
-  setting_id: string
-  ciphertext: Uint8Array
-  iv: Uint8Array
-  key_fingerprint: string
+/** Base64-encode AES-GCM bytes for transport to Convex (which stores them base64). */
+function toBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('base64')
+}
+
+/** Decode the base64 `ciphertext` / `iv` Convex returns back into bytes for decryption. */
+function fromBase64(value: string): Uint8Array {
+  return new Uint8Array(Buffer.from(value, 'base64'))
 }
 
 /**
@@ -86,18 +99,13 @@ export interface PluginSecretState {
 }
 
 export async function listPluginSecretStates(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
 ): Promise<PluginSecretState[]> {
-  const { rows } = await db<{ setting_id: string; key_fingerprint: string }>`
-    select setting_id, key_fingerprint
-    from plugin_secrets
-    where plugin_id = ${pluginId}
-    order by setting_id
-  `
+  const rows = await getConvex().query(api.pluginSecrets.listStates, { pluginId })
   if (rows.length === 0) return []
   const current = await currentFingerprintOrNull(pluginId)
-  return rows.map((row) => ({
+  return rows.map((row: { setting_id: string; key_fingerprint: string }) => ({
     settingId: row.setting_id,
     keyFingerprintCurrent: row.key_fingerprint === current,
   }))
@@ -137,18 +145,14 @@ async function currentFingerprintOrNull(pluginId: string): Promise<string | null
  * operator knows re-entry is needed.
  */
 export async function resolvePluginSecretsForRuntime(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
 ): Promise<Record<string, string>> {
   const secretIds = new Set(declared.filter((s) => s.secret).map((s) => s.id))
   if (secretIds.size === 0) return {}
 
-  const { rows } = await db<PluginSecretRow>`
-    select setting_id, ciphertext, iv, key_fingerprint
-    from plugin_secrets
-    where plugin_id = ${pluginId}
-  `
+  const rows = await getConvex().query(api.pluginSecrets.listForRuntime, { pluginId })
   if (rows.length === 0) return {}
 
   let masterKey: CryptoKey
@@ -174,9 +178,11 @@ export async function resolvePluginSecretsForRuntime(
       continue
     }
     try {
+      // Convex returns ciphertext/iv as base64 strings — decode to bytes for
+      // the AES-GCM decrypt (the master key never leaves the Bun server).
       out[row.setting_id] = await decryptSecret(masterKey, {
-        ciphertext: row.ciphertext,
-        iv: row.iv,
+        ciphertext: fromBase64(row.ciphertext),
+        iv: fromBase64(row.iv),
       })
     } catch (err) {
       console.error(`[plugin:${pluginId}] failed to decrypt secret setting "${row.setting_id}":`, err)
@@ -205,7 +211,7 @@ export async function resolvePluginSecretsForRuntime(
  * misconfigured — handlers surface it as a `{ error }` envelope.
  */
 export async function applyPluginSecretSettings(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
   settings: PluginSettingsValues,
@@ -226,9 +232,9 @@ export async function applyPluginSecretSettings(
     // currently needs re-entry — preserving it keeps the warning honest).
     if (typeof value !== 'string' || value === SECRET_SETTING_MASK) continue
     if (value === '') {
-      await deletePluginSecret(db, pluginId, def.id)
+      await deletePluginSecret(pluginId, def.id)
     } else {
-      await writePluginSecret(db, pluginId, def.id, value)
+      await writePluginSecret(pluginId, def.id, value)
     }
   }
   return plain
@@ -240,48 +246,40 @@ export async function applyPluginSecretSettings(
  * upgrade and rollback flows never clobber a value the site owner rotated.
  */
 export async function seedPluginSecretDefaults(
-  db: DbClient,
+  _db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
 ): Promise<void> {
   for (const def of declared) {
     if (!def.secret || typeof def.default !== 'string' || def.default === '') continue
     const { ciphertext, iv, fingerprint } = await encryptPluginSecret(pluginId, def.default)
-    await db`
-      insert into plugin_secrets (plugin_id, setting_id, ciphertext, iv, key_fingerprint)
-      values (${pluginId}, ${def.id}, ${ciphertext}, ${iv}, ${fingerprint})
-      on conflict (plugin_id, setting_id) do nothing
-    `
+    await getConvex().mutation(api.pluginSecrets.seedDefault, {
+      pluginId,
+      settingId: def.id,
+      ciphertext: toBase64(ciphertext),
+      iv: toBase64(iv),
+      keyFingerprint: fingerprint,
+    })
   }
 }
 
 async function writePluginSecret(
-  db: DbClient,
   pluginId: string,
   settingId: string,
   plaintext: string,
 ): Promise<void> {
   const { ciphertext, iv, fingerprint } = await encryptPluginSecret(pluginId, plaintext)
-  await db`
-    insert into plugin_secrets (plugin_id, setting_id, ciphertext, iv, key_fingerprint)
-    values (${pluginId}, ${settingId}, ${ciphertext}, ${iv}, ${fingerprint})
-    on conflict (plugin_id, setting_id) do update
-      set ciphertext = excluded.ciphertext,
-          iv = excluded.iv,
-          key_fingerprint = excluded.key_fingerprint,
-          updated_at = current_timestamp
-  `
+  await getConvex().mutation(api.pluginSecrets.upsert, {
+    pluginId,
+    settingId,
+    ciphertext: toBase64(ciphertext),
+    iv: toBase64(iv),
+    keyFingerprint: fingerprint,
+  })
 }
 
-async function deletePluginSecret(
-  db: DbClient,
-  pluginId: string,
-  settingId: string,
-): Promise<void> {
-  await db`
-    delete from plugin_secrets
-    where plugin_id = ${pluginId} and setting_id = ${settingId}
-  `
+async function deletePluginSecret(pluginId: string, settingId: string): Promise<void> {
+  await getConvex().mutation(api.pluginSecrets.remove, { pluginId, settingId })
 }
 
 async function encryptPluginSecret(

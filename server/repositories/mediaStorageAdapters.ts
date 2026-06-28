@@ -18,6 +18,7 @@
 import type { DbClient } from '../db/client'
 import { isoDate } from '@core/utils/isoDate'
 import type { MediaAssetRole } from '@core/plugin-sdk'
+import { api, getConvex } from '../convex/client'
 
 interface ElectedAdapterRow {
   role: string
@@ -47,24 +48,18 @@ function mapRow(row: ElectedAdapterRow): ElectedAdapter {
  * when no row exists for the role — that's the post-fresh-install default.
  */
 export async function getElectedAdapterId(
-  db: DbClient,
+  _db: DbClient,
   role: MediaAssetRole,
 ): Promise<string> {
-  const { rows } = await db<{ adapter_id: string }>`
-    select adapter_id from active_media_storage_adapter where role = ${role}
-  `
-  return rows[0]?.adapter_id ?? ''
+  return getConvex().query(api.mediaStorage.getElectedAdapterId, { role })
 }
 
 /**
  * Snapshot every elected adapter (all roles, including unset ones which
  * resolve to `''`). Used by the admin UI to render the election picker.
  */
-export async function listElectedAdapters(db: DbClient): Promise<ElectedAdapter[]> {
-  const { rows } = await db<ElectedAdapterRow>`
-    select role, adapter_id, elected_at, elected_by_user_id
-    from active_media_storage_adapter
-  `
+export async function listElectedAdapters(_db: DbClient): Promise<ElectedAdapter[]> {
+  const rows = await getConvex().query(api.mediaStorage.listElectedAdapters, {})
   return rows.map(mapRow)
 }
 
@@ -77,22 +72,17 @@ export async function listElectedAdapters(db: DbClient): Promise<ElectedAdapter[
  * and SQLite (the `db-postgres-isms.test.ts` gate confirms this is ANSI).
  */
 export async function electAdapter(
-  db: DbClient,
+  _db: DbClient,
   role: MediaAssetRole,
   adapterId: string,
   userId: string | null,
 ): Promise<ElectedAdapter> {
-  const nowIso = new Date().toISOString()
-  const { rows } = await db<ElectedAdapterRow>`
-    insert into active_media_storage_adapter (role, adapter_id, elected_at, elected_by_user_id)
-    values (${role}, ${adapterId}, ${nowIso}, ${userId})
-    on conflict (role) do update
-      set adapter_id = excluded.adapter_id,
-          elected_at = excluded.elected_at,
-          elected_by_user_id = excluded.elected_by_user_id
-    returning role, adapter_id, elected_at, elected_by_user_id
-  `
-  return mapRow(rows[0])
+  const row = await getConvex().mutation(api.mediaStorage.electAdapter, {
+    role,
+    adapterId,
+    userId,
+  })
+  return mapRow(row)
 }
 
 /**
@@ -101,13 +91,10 @@ export async function electAdapter(
  * (b) block uninstalling a plugin whose adapter still has live rows.
  */
 export async function countAssetsForAdapter(
-  db: DbClient,
+  _db: DbClient,
   adapterId: string,
 ): Promise<number> {
-  const { rows } = await db<{ n: number | string }>`
-    select count(*) as n from media_assets where storage_adapter_id = ${adapterId}
-  `
-  return Number(rows[0]?.n ?? 0)
+  return getConvex().query(api.mediaStorage.countAssetsForAdapter, { adapterId })
 }
 
 // ---------------------------------------------------------------------------
@@ -177,15 +164,10 @@ function mapVariantDelegateRow(row: VariantDelegateRow): ElectedVariantDelegate 
  * delegate is active per host.
  */
 export async function getElectedVariantDelegate(
-  db: DbClient,
+  _db: DbClient,
 ): Promise<ElectedVariantDelegate | null> {
-  const { rows } = await db<VariantDelegateRow>`
-    select delegate_id, variant_url_template, widths_json, formats_json,
-           elected_at, elected_by_user_id
-    from active_media_variant_delegate
-    where singleton = 1
-  `
-  return rows[0] ? mapVariantDelegateRow(rows[0]) : null
+  const row = await getConvex().query(api.mediaStorage.getElectedVariantDelegate, {})
+  return row ? mapVariantDelegateRow(row) : null
 }
 
 /**
@@ -195,41 +177,23 @@ export async function getElectedVariantDelegate(
  * sharp ladder.
  */
 export async function electVariantDelegate(
-  db: DbClient,
+  _db: DbClient,
   delegate: Omit<ElectedVariantDelegate, 'electedAt' | 'electedByUserId'>,
   userId: string | null,
 ): Promise<ElectedVariantDelegate> {
-  const nowIso = new Date().toISOString()
-  const { rows } = await db<VariantDelegateRow>`
-    insert into active_media_variant_delegate (
-      singleton, delegate_id, variant_url_template,
-      widths_json, formats_json, elected_at, elected_by_user_id
-    )
-    values (
-      1,
-      ${delegate.delegateId},
-      ${delegate.variantUrlTemplate},
-      ${delegate.widths},
-      ${delegate.formats},
-      ${nowIso},
-      ${userId}
-    )
-    on conflict (singleton) do update
-      set delegate_id = excluded.delegate_id,
-          variant_url_template = excluded.variant_url_template,
-          widths_json = excluded.widths_json,
-          formats_json = excluded.formats_json,
-          elected_at = excluded.elected_at,
-          elected_by_user_id = excluded.elected_by_user_id
-    returning delegate_id, variant_url_template, widths_json, formats_json,
-              elected_at, elected_by_user_id
-  `
-  return mapVariantDelegateRow(rows[0])
+  const row = await getConvex().mutation(api.mediaStorage.electVariantDelegate, {
+    delegateId: delegate.delegateId,
+    variantUrlTemplate: delegate.variantUrlTemplate,
+    widths: [...delegate.widths],
+    formats: [...delegate.formats],
+    userId,
+  })
+  return mapVariantDelegateRow(row)
 }
 
 /**
  * Clear the elected delegate — host falls back to the local sharp ladder.
  */
-export async function clearVariantDelegate(db: DbClient): Promise<void> {
-  await db`delete from active_media_variant_delegate where singleton = 1`
+export async function clearVariantDelegate(_db: DbClient): Promise<void> {
+  await getConvex().mutation(api.mediaStorage.clearVariantDelegate, {})
 }
