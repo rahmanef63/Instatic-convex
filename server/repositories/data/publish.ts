@@ -23,58 +23,10 @@
  * artefact writes, cache bump) lives in `server/publish/publishRow.ts` and
  * calls down into this repository.
  */
-import { nanoid } from 'nanoid'
-import { placeholder, type DbClient } from '../../db/client'
-import { userRefColumns, userRefJoin } from './shared'
+import type { DbClient } from '../../db/client'
+import { api, getConvex } from '../../convex/client'
 import type { DataRow, DataRowVersion, DataRowRedirect, PublishedDataRow } from '@core/data/schemas'
 import { normalizeRouteBase } from '@core/templates/templateMatching'
-import { readFeaturedMediaCell } from '@core/data/cells'
-import { getDataRow } from './rows'
-import { nextDataRowVersionNumber } from './versions'
-import { isoDate } from '@core/utils/isoDate'
-
-// ---------------------------------------------------------------------------
-// Internal row shapes
-// ---------------------------------------------------------------------------
-
-interface PublishedDataRowQueryRow {
-  id: string
-  row_id: string
-  table_id: string
-  table_slug: string
-  table_kind: string
-  table_route_base: string
-  version_number: number
-  cells_json: Record<string, unknown>
-  slug: string
-  author_user_id?: string | null
-  author_display_name?: string | null
-  author_role_slug?: string | null
-  author_role_name?: string | null
-  published_by_user_id?: string | null
-  published_by_display_name?: string | null
-  published_by_role_slug?: string | null
-  published_by_role_name?: string | null
-  published_at: string | Date
-  created_at: string | Date
-}
-
-interface PreviousPublishedRouteRow {
-  previous_slug: string
-  previous_route_base: string
-}
-
-interface DataRowRedirectRow {
-  id: string
-  from_route_base: string
-  from_slug: string
-  target_route_base: string
-  target_slug: string
-}
-
-interface MediaAssetRow {
-  public_path: string | null
-}
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -126,11 +78,15 @@ export function previousRouteChanged(previous: PreviousPublishedRoute, currentSl
 // ---------------------------------------------------------------------------
 
 /**
- * Transactional write of one row publish. DB writes only — the publish lock,
- * artefact bake, and cache bump are owned by `server/publish/publishRow.ts`.
+ * Transactional write of one row publish — one atomic Convex mutation
+ * (`api.dataPublish.persistRowPublish`, docs/CONVEX-MIGRATION.md §3 #8). The
+ * mutation allocates the version number atomically (read current max for the
+ * row, insert max+1), appends the version, flips the row to `published`, and
+ * upserts the redirect when the slug changed. DB writes only — the publish
+ * lock, artefact bake, and cache bump are owned by `server/publish/publishRow.ts`.
  */
 export async function persistDataRowPublish(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   /**
    * The user attributed as the publisher. `null` is allowed for system
@@ -142,96 +98,10 @@ export async function persistDataRowPublish(
    */
   publisherUserId: string | null,
 ): Promise<PersistDataRowPublishResult> {
-  return db.transaction(async (tx) => {
-    const row = await getDataRow(tx, rowId)
-    if (!row) throw new Error('data row not found')
-
-    const previousRoute = await readPreviousPublishedRoute(tx, rowId)
-    const versionNumber = await nextDataRowVersionNumber(tx, rowId)
-    const versionId = nanoid()
-
-    await tx`
-      insert into data_row_versions
-        (id, row_id, version_number, cells_json, slug, published_by_user_id)
-      values (
-        ${versionId},
-        ${row.id},
-        ${versionNumber},
-        ${row.cells},
-        ${row.slug},
-        ${publisherUserId}
-      )
-    `
-
-    const { rows: updateRows } = await tx<{ id: string }>`
-      update data_rows
-      set status = 'published',
-          active_version_id = ${versionId},
-          published_by_user_id = ${publisherUserId},
-          published_at = current_timestamp,
-          updated_by_user_id = ${publisherUserId},
-          updated_at = current_timestamp
-      where id = ${row.id}
-        and deleted_at is null
-      returning id
-    `
-    if (!updateRows[0]) throw new Error('data row publish update failed')
-
-    if (previousRoute && previousRouteChanged(previousRoute, row.slug)) {
-      await tx`
-        insert into data_row_redirects (id, table_id, from_route_base, from_slug, target_row_id)
-        values (
-          ${nanoid()},
-          ${row.tableId},
-          ${normalizeRouteBase(previousRoute.routeBase)},
-          ${previousRoute.slug},
-          ${row.id}
-        )
-        on conflict (from_route_base, from_slug) do update
-          set table_id = excluded.table_id,
-              target_row_id = excluded.target_row_id
-      `
-    }
-
-    const publishedRow = await getDataRow(tx, row.id)
-    if (!publishedRow) throw new Error('data row could not be re-read after publish')
-
-    const publishedAt = publishedRow.publishedAt ?? new Date().toISOString()
-    return {
-      row: publishedRow,
-      version: {
-        id: versionId,
-        rowId: publishedRow.id,
-        versionNumber,
-        cells: publishedRow.cells,
-        slug: publishedRow.slug,
-        publishedByUserId: publisherUserId,
-        publishedAt,
-        createdAt: publishedAt,
-      },
-      previousRoute,
-    }
+  return getConvex().mutation(api.dataPublish.persistRowPublish, {
+    rowId,
+    publisherUserId,
   })
-}
-
-async function readPreviousPublishedRoute(
-  db: DbClient,
-  rowId: string,
-): Promise<PreviousPublishedRoute | null> {
-  const { rows } = await db<PreviousPublishedRouteRow>`
-    select data_row_versions.slug as previous_slug,
-           data_tables.route_base as previous_route_base
-    from data_rows
-    join data_tables on data_tables.id = data_rows.table_id
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    where data_rows.id = ${rowId}
-      and data_rows.deleted_at is null
-      and data_tables.deleted_at is null
-    limit 1
-  `
-  return rows[0]
-    ? { slug: rows[0].previous_slug, routeBase: rows[0].previous_route_base }
-    : null
 }
 
 // ---------------------------------------------------------------------------
@@ -245,23 +115,14 @@ async function readPreviousPublishedRoute(
  * joining the table into every other query.
  */
 export async function getRowTableRouteInfo(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
 ): Promise<RowTableRouteInfo | null> {
-  const { rows } = await db<{ route_base: string; table_slug: string }>`
-    select data_tables.route_base,
-           data_tables.slug as table_slug
-    from data_rows
-    join data_tables on data_tables.id = data_rows.table_id
-    where data_rows.id = ${rowId}
-      and data_rows.deleted_at is null
-      and data_tables.deleted_at is null
-    limit 1
-  `
-  if (!rows[0]) return null
+  const info = await getConvex().query(api.dataPublish.rowTableRouteInfo, { rowId })
+  if (!info) return null
   return {
-    tableRouteBase: normalizeRouteBase(rows[0].route_base),
-    tableSlug: rows[0].table_slug,
+    tableRouteBase: normalizeRouteBase(info.routeBase),
+    tableSlug: info.tableSlug,
   }
 }
 
@@ -271,17 +132,10 @@ export async function getRowTableRouteInfo(
  * route after a soft delete (ISS-039).
  */
 export async function getRowTableRouteBase(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
 ): Promise<string | null> {
-  const { rows } = await db<{ route_base: string }>`
-    select data_tables.route_base
-    from data_rows
-    join data_tables on data_tables.id = data_rows.table_id
-    where data_rows.id = ${rowId}
-    limit 1
-  `
-  return rows[0]?.route_base ?? null
+  return getConvex().query(api.dataPublish.rowTableRouteBase, { rowId })
 }
 
 // ---------------------------------------------------------------------------
@@ -303,31 +157,13 @@ interface PublishedRowRoute {
  * without it, the slot swap would strand every row artefact written by
  * incremental publishes.
  */
-export async function listPublishedRowRoutes(db: DbClient): Promise<PublishedRowRoute[]> {
-  const { rows } = await db<{
-    row_id: string
-    row_slug: string
-    table_slug: string
-    table_route_base: string
-  }>`
-    select data_rows.id as row_id,
-           data_row_versions.slug as row_slug,
-           data_tables.slug as table_slug,
-           data_tables.route_base as table_route_base
-    from data_rows
-    join data_tables on data_tables.id = data_rows.table_id
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    where data_rows.table_id <> 'pages'
-      and data_rows.status = 'published'
-      and data_rows.deleted_at is null
-      and data_tables.deleted_at is null
-    order by data_rows.created_at asc
-  `
+export async function listPublishedRowRoutes(_db: DbClient): Promise<PublishedRowRoute[]> {
+  const rows = await getConvex().query(api.dataPublish.listPublishedRowRoutes, {})
   return rows.map((row) => ({
-    rowId: row.row_id,
-    rowSlug: row.row_slug,
-    tableSlug: row.table_slug,
-    tableRouteBase: normalizeRouteBase(row.table_route_base),
+    rowId: row.rowId,
+    rowSlug: row.rowSlug,
+    tableSlug: row.tableSlug,
+    tableRouteBase: normalizeRouteBase(row.tableRouteBase),
   }))
 }
 
@@ -342,124 +178,62 @@ export async function listPublishedRowRoutes(db: DbClient): Promise<PublishedRow
  * query dialect-naive (no JSON-extract functions, no PG-specific operators).
  */
 export async function getPublishedDataRowByRoute(
-  db: DbClient,
+  _db: DbClient,
   tableRouteBase: string,
   rowSlug: string,
 ): Promise<PublishedDataRow | null> {
   const normalizedBase = normalizeRouteBase(tableRouteBase)
 
-  // The author/publisher user-ref joins reuse the shared `userRefColumns` /
-  // `userRefJoin` fragments (the single source, also spliced by the hydrated
-  // data-row SELECT in `rows/mapper.ts`). The publisher join targets
-  // `data_row_versions.published_by_user_id` — the per-version publisher — not
-  // `data_rows.published_by_user_id`. SQL stays dialect-naive (ANSI joins,
-  // positional `placeholder()` binds).
-  const p = (n: number) => placeholder(db.dialect, n)
-  const { rows } = await db.unsafe<PublishedDataRowQueryRow>(
-    `select data_row_versions.id,
-           data_row_versions.row_id,
-           data_rows.table_id,
-           data_tables.slug as table_slug,
-           data_tables.kind as table_kind,
-           data_tables.route_base as table_route_base,
-           data_row_versions.version_number,
-           data_row_versions.cells_json,
-           data_row_versions.slug,
-           data_rows.author_user_id,
-           ${userRefColumns('author')},
-           data_row_versions.published_by_user_id,
-           ${userRefColumns('published_by')},
-           data_row_versions.published_at,
-           data_row_versions.created_at
-    from data_rows
-    join data_tables on data_tables.id = data_rows.table_id
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    ${userRefJoin('author', 'data_rows.author_user_id')}
-    ${userRefJoin('published_by', 'data_row_versions.published_by_user_id')}
-    where data_tables.route_base = ${p(1)}
-      and data_row_versions.slug = ${p(2)}
-      and data_rows.status = 'published'
-      and data_rows.deleted_at is null
-      and data_tables.deleted_at is null
-    limit 1`,
-    [normalizedBase, rowSlug],
-  )
-
-  if (!rows[0]) return null
-
-  const queryRow = rows[0]
-  const cells = queryRow.cells_json
-
-  // Resolve featuredMediaPath in app code: read the cell value, then do a
-  // second query only when a media id is present. This avoids any
-  // dialect-specific JSON extraction in the primary query.
-  const featuredMediaId = readFeaturedMediaCell(cells)
-  let featuredMediaPath: string | null = null
-
-  if (featuredMediaId) {
-    const { rows: mediaRows } = await db<MediaAssetRow>`
-      select public_path from media_assets
-      where id = ${featuredMediaId}
-      limit 1
-    `
-    featuredMediaPath = mediaRows[0]?.public_path ?? null
-  }
+  // The Convex query hand-joins the table + author + per-version publisher and
+  // resolves `featuredMediaPath` via a `media_assets` lookup (the publisher ref
+  // targets `data_row_versions.published_by_user_id`, the per-version
+  // publisher). `cells` arrives already parsed.
+  const queryRow = await getConvex().query(api.dataPublish.publishedDataRowByRoute, {
+    normalizedRouteBase: normalizedBase,
+    rowSlug,
+  })
+  if (!queryRow) return null
 
   return {
     id: queryRow.id,
-    rowId: queryRow.row_id,
-    tableId: queryRow.table_id,
-    tableSlug: queryRow.table_slug,
-    tableKind: queryRow.table_kind as PublishedDataRow['tableKind'],
-    tableRouteBase: normalizeRouteBase(queryRow.table_route_base),
-    versionNumber: Number(queryRow.version_number),
-    cells,
+    rowId: queryRow.rowId,
+    tableId: queryRow.tableId,
+    tableSlug: queryRow.tableSlug,
+    tableKind: queryRow.tableKind as PublishedDataRow['tableKind'],
+    tableRouteBase: normalizeRouteBase(queryRow.tableRouteBase),
+    versionNumber: queryRow.versionNumber,
+    cells: queryRow.cells,
     slug: queryRow.slug,
-    featuredMediaId,
-    featuredMediaPath,
-    authorUserId: queryRow.author_user_id ?? null,
-    authorName: queryRow.author_display_name ?? null,
-    authorRoleSlug: queryRow.author_role_slug ?? null,
-    authorRoleName: queryRow.author_role_name ?? null,
-    publishedByUserId: queryRow.published_by_user_id ?? null,
-    publishedByName: queryRow.published_by_display_name ?? null,
-    publishedByRoleSlug: queryRow.published_by_role_slug ?? null,
-    publishedByRoleName: queryRow.published_by_role_name ?? null,
-    publishedAt: isoDate(queryRow.published_at),
-    createdAt: isoDate(queryRow.created_at),
+    featuredMediaId: queryRow.featuredMediaId,
+    featuredMediaPath: queryRow.featuredMediaPath,
+    authorUserId: queryRow.authorUserId,
+    authorName: queryRow.authorName,
+    authorRoleSlug: queryRow.authorRoleSlug,
+    authorRoleName: queryRow.authorRoleName,
+    publishedByUserId: queryRow.publishedByUserId,
+    publishedByName: queryRow.publishedByName,
+    publishedByRoleSlug: queryRow.publishedByRoleSlug,
+    publishedByRoleName: queryRow.publishedByRoleName,
+    publishedAt: queryRow.publishedAt,
+    createdAt: queryRow.createdAt,
   }
 }
 
 export async function getDataRowRedirectByRoute(
-  db: DbClient,
+  _db: DbClient,
   tableRouteBase: string,
   rowSlug: string,
 ): Promise<DataRowRedirect | null> {
   const normalizedBase = normalizeRouteBase(tableRouteBase)
 
-  const { rows } = await db<DataRowRedirectRow>`
-    select data_row_redirects.id,
-           data_row_redirects.from_route_base,
-           data_row_redirects.from_slug,
-           data_tables.route_base as target_route_base,
-           data_row_versions.slug as target_slug
-    from data_row_redirects
-    join data_rows target_rows on target_rows.id = data_row_redirects.target_row_id
-    join data_tables on data_tables.id = target_rows.table_id
-    join data_row_versions on data_row_versions.id = target_rows.active_version_id
-    where data_row_redirects.from_route_base = ${normalizedBase}
-      and data_row_redirects.from_slug = ${rowSlug}
-      and target_rows.status = 'published'
-      and target_rows.deleted_at is null
-      and data_tables.deleted_at is null
-    limit 1
-  `
+  const queryRow = await getConvex().query(api.dataPublish.redirectByRoute, {
+    normalizedRouteBase: normalizedBase,
+    rowSlug,
+  })
+  if (!queryRow) return null
 
-  if (!rows[0]) return null
-
-  const queryRow = rows[0]
-  const fromPath = publicDataPath(queryRow.from_route_base, queryRow.from_slug)
-  const targetPath = publicDataPath(queryRow.target_route_base, queryRow.target_slug)
+  const fromPath = publicDataPath(queryRow.fromRouteBase, queryRow.fromSlug)
+  const targetPath = publicDataPath(queryRow.targetRouteBase, queryRow.targetSlug)
   if (fromPath === targetPath) return null
 
   return { id: queryRow.id, fromPath, targetPath }
@@ -482,51 +256,26 @@ export interface ExportableRedirect {
   targetRowId: string
 }
 
-interface ExportableRedirectRow {
-  id: string
-  table_id: string
-  from_route_base: string
-  from_slug: string
-  target_row_id: string
-}
-
 /** Every redirect, raw, for a full-site export. */
-export async function listExportableRedirects(db: DbClient): Promise<ExportableRedirect[]> {
-  const { rows } = await db<ExportableRedirectRow>`
-    select id, table_id, from_route_base, from_slug, target_row_id
-    from data_row_redirects
-    order by from_route_base asc, from_slug asc
-  `
-  return rows.map((row) => ({
-    id: row.id,
-    tableId: row.table_id,
-    fromRouteBase: row.from_route_base,
-    fromSlug: row.from_slug,
-    targetRowId: row.target_row_id,
-  }))
+export async function listExportableRedirects(_db: DbClient): Promise<ExportableRedirect[]> {
+  return getConvex().query(api.dataPublish.listExportableRedirects, {})
 }
 
 /** Wipe all redirects — used by the `replace` import strategy before reinsert. */
-export async function deleteAllDataRowRedirects(db: DbClient): Promise<void> {
-  await db`delete from data_row_redirects`
+export async function deleteAllDataRowRedirects(_db: DbClient): Promise<void> {
+  await getConvex().mutation(api.dataPublish.deleteAllRedirects, {})
 }
 
 /**
  * Insert a redirect preserving its original id, upserting on the unique
  * (from_route_base, from_slug) source key. Used by the bundle import handler.
  */
-export async function importDataRowRedirect(db: DbClient, input: ExportableRedirect): Promise<void> {
-  await db`
-    insert into data_row_redirects (id, table_id, from_route_base, from_slug, target_row_id)
-    values (
-      ${input.id},
-      ${input.tableId},
-      ${input.fromRouteBase},
-      ${input.fromSlug},
-      ${input.targetRowId}
-    )
-    on conflict (from_route_base, from_slug) do update
-      set table_id = excluded.table_id,
-          target_row_id = excluded.target_row_id
-  `
+export async function importDataRowRedirect(_db: DbClient, input: ExportableRedirect): Promise<void> {
+  await getConvex().mutation(api.dataPublish.importRedirect, {
+    id: input.id,
+    tableId: input.tableId,
+    fromRouteBase: input.fromRouteBase,
+    fromSlug: input.fromSlug,
+    targetRowId: input.targetRowId,
+  })
 }

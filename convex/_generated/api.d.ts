@@ -14,6 +14,9 @@
  * @module
  */
 
+import type * as dataPublish from "../dataPublish.js";
+import type * as dataRows from "../dataRows.js";
+import type * as dataTables from "../dataTables.js";
 import type * as loginAttempts from "../loginAttempts.js";
 import type * as roles from "../roles.js";
 import type * as sessions from "../sessions.js";
@@ -35,6 +38,9 @@ import type {
  * ```
  */
 declare const fullApi: ApiFromModules<{
+  dataPublish: typeof dataPublish;
+  dataRows: typeof dataRows;
+  dataTables: typeof dataTables;
   loginAttempts: typeof loginAttempts;
   roles: typeof roles;
   sessions: typeof sessions;

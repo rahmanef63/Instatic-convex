@@ -26,13 +26,13 @@ import type { SiteDocument } from '@core/page-tree'
 import type { PublishedPageRuntimeAssets } from '@core/site-runtime'
 import type { PublishedRuntimePackageImportmap } from '@core/publisher'
 import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 import type { BuiltRuntimeAssetFile } from '../publish/runtime/bundleScripts'
 import { getDraftSite } from './site'
 import { listDataRows } from './data'
 import { pageFromRow } from '../../src/core/data/pageFromRow'
 import { visualComponentFromRow } from '../../src/core/data/componentFromRow'
 import { validateVisualComponents } from '../../src/core/persistence/validate'
-import { savePublishedRuntimeAssets } from './runtimeAsset'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,19 +61,18 @@ interface DraftPublishStatus {
   lastPublishedAt?: string
 }
 
-interface PublishStatusRow {
-  row_id: string
-  content_hash: string
-  published_at: string | Date
-}
-
-/** Shared SELECT shape for the snapshot getters below. */
+/**
+ * Shared shape returned by the Convex snapshot getters below. `site` and
+ * `runtimeAssets` cross the Convex `v.any()` channel as opaque JSON (the `@core`
+ * shapes cannot enter the Convex runtime), so they arrive untyped and are
+ * trusted back into their stored shapes in `snapshotFromQueryRow`.
+ */
 interface SnapshotQueryRow {
-  row_id: string
-  site_json: SiteDocument
-  runtime_assets_json: PublishedPageRuntimeAssets | null
-  importmap_body: string | null
-  importmap_sha256: string | null
+  rowId: string
+  site: unknown
+  runtimeAssets: unknown
+  importmapBody: string | null
+  importmapSha256: string | null
 }
 
 /** One page's version write within `persistSitePublish`. */
@@ -123,17 +122,22 @@ function siteContentHash(site: SiteDocument): string {
   return createHash('sha256').update(canonicalJson(site)).digest('hex')
 }
 
-/** Reassemble the `PublishedPageSnapshot` shape from the getter join. */
+/** Reassemble the `PublishedPageSnapshot` shape from the getter result. */
 function snapshotFromQueryRow(row: SnapshotQueryRow): PublishedPageSnapshot {
+  // The snapshot was serialised and stored by the publisher, then round-tripped
+  // whole through the Convex `v.any()` channel; trust it back into its stored
+  // shapes (mirrors the old SQLite row-interface typing of `site_json`).
+  const site = row.site as SiteDocument
+  const runtimeAssets = row.runtimeAssets as PublishedPageRuntimeAssets | null
   return {
     cmsSnapshotVersion: 1,
-    pageRowId: row.row_id,
-    site: row.site_json,
-    ...(row.runtime_assets_json && row.runtime_assets_json.scripts.length > 0
-      ? { runtimeAssets: row.runtime_assets_json }
+    pageRowId: row.rowId,
+    site,
+    ...(runtimeAssets && runtimeAssets.scripts.length > 0
+      ? { runtimeAssets }
       : {}),
-    ...(row.importmap_body && row.importmap_sha256
-      ? { runtimePackageImportmap: { body: row.importmap_body, sha256: row.importmap_sha256 } }
+    ...(row.importmapBody && row.importmapSha256
+      ? { runtimePackageImportmap: { body: row.importmapBody, sha256: row.importmapSha256 } }
       : {}),
   }
 }
@@ -181,29 +185,18 @@ export async function getDraftPublishStatus(db: DbClient): Promise<DraftPublishS
   // document. Comparing the draft's hash against each row's stamped hash is
   // observationally identical to comparing canonical JSON strings, but costs
   // one draft serialisation instead of one per published page.
-  const { rows: publishedRows } = await db<PublishStatusRow>`
-    select data_rows.id as row_id,
-           site_snapshots.content_hash,
-           data_row_versions.published_at
-    from data_rows
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    join site_snapshots on site_snapshots.id = data_row_versions.site_snapshot_id
-    where data_rows.table_id = 'pages'
-      and data_rows.status = 'published'
-      and data_rows.deleted_at is null
-    order by data_rows.created_at asc
-  `
+  const publishedRows = await getConvex().query(api.dataPublish.listPublishedPageStatus, {})
 
   const draftSiteHash = siteContentHash(draftSite)
   const draftPageIds = new Set(draftSite.pages.map((page) => page.id))
   const draftMatchesPublished =
     publishedRows.length === draftSite.pages.length &&
     publishedRows.every((row) =>
-      draftPageIds.has(row.row_id) &&
-      row.content_hash === draftSiteHash
+      draftPageIds.has(row.rowId) &&
+      row.contentHash === draftSiteHash
     )
   const lastPublishedAt = publishedRows
-    .map((row) => new Date(row.published_at).getTime())
+    .map((row) => new Date(row.publishedAt).getTime())
     .filter(Number.isFinite)
     .sort((a, b) => b - a)[0]
 
@@ -217,129 +210,67 @@ export async function getDraftPublishStatus(db: DbClient): Promise<DraftPublishS
 }
 
 /**
- * Transactional write of one full publish: the site snapshot row plus one
- * `data_row_versions` row (and its runtime asset files) per page, flipping
- * each page row to `published`. DB writes only — every expensive non-DB
- * build (runtime bundling, rendering) happens in the orchestrator BEFORE
- * this is called, so the SQLite adapter's serialized transaction chain is
- * held for milliseconds, not seconds.
+ * Transactional write of one full publish — one atomic Convex mutation
+ * (`api.dataPublish.persistSitePublish`, docs/CONVEX-MIGRATION.md §3 #7): the
+ * site snapshot row plus one `data_row_versions` row (and its runtime asset
+ * files) per page, flipping each page row to `published`. DB writes only —
+ * every expensive non-DB build (runtime bundling, rendering) happens in the
+ * orchestrator BEFORE this is called.
+ *
+ * The page-scoped runtime-asset bytes (`v.bytes()` columns) are copied into
+ * fresh `ArrayBuffer`s for the Convex transport. The content hash is computed
+ * here (Node crypto stays in the Bun server) and stamped on the snapshot; the
+ * `*_json` blobs travel as hydrated values and are serialised inside the
+ * mutation.
  */
 export async function persistSitePublish(
-  db: DbClient,
+  _db: DbClient,
   input: PersistSitePublishInput,
 ): Promise<void> {
-  await db.transaction(async (tx) => {
-    // The site document is stored ONCE per publish; every page version row
-    // references it. The content hash powers the publish-status check without
-    // ever re-fetching the document.
-    await tx`
-      insert into site_snapshots (id, site_json, content_hash, importmap_body, importmap_sha256)
-      values (
-        ${input.siteSnapshotId},
-        ${input.site},
-        ${siteContentHash(input.site)},
-        ${input.serializedImportmap?.body ?? null},
-        ${input.serializedImportmap?.sha256 ?? null}
-      )
-    `
-
-    for (const page of input.pages) {
-      await tx`
-        insert into data_row_versions
-          (id, row_id, version_number, cells_json, slug, site_snapshot_id, runtime_assets_json, published_by_user_id)
-        values (
-          ${page.versionId},
-          ${page.pageId},
-          ${page.versionNumber},
-          ${{ title: page.title, slug: page.slug }},
-          ${page.slug},
-          ${input.siteSnapshotId},
-          ${page.runtimeAssets},
-          ${input.publishedByUserId}
-        )
-      `
-      await savePublishedRuntimeAssets(tx, page.versionId, page.runtimeFiles)
-      const { rowCount } = await tx`
-        update data_rows
-        set active_version_id = ${page.versionId},
-            status = 'published',
-            published_by_user_id = ${input.publishedByUserId},
-            published_at = current_timestamp,
-            updated_by_user_id = ${input.publishedByUserId},
-            updated_at = current_timestamp
-        where id = ${page.pageId}
-          and deleted_at is null
-      `
-      // The page was read before the transaction opened; if a concurrent save
-      // reaped it in between, don't leave an orphan version pointing at it.
-      if (rowCount === 0) {
-        await tx`delete from data_row_versions where id = ${page.versionId}`
-      }
-    }
+  await getConvex().mutation(api.dataPublish.persistSitePublish, {
+    siteSnapshotId: input.siteSnapshotId,
+    site: input.site,
+    contentHash: siteContentHash(input.site),
+    importmapBody: input.serializedImportmap?.body ?? null,
+    importmapSha256: input.serializedImportmap?.sha256 ?? null,
+    publishedByUserId: input.publishedByUserId,
+    pages: input.pages.map((page) => ({
+      pageId: page.pageId,
+      versionId: page.versionId,
+      versionNumber: page.versionNumber,
+      title: page.title,
+      slug: page.slug,
+      runtimeAssets: page.runtimeAssets,
+      runtimeFiles: page.runtimeFiles.map((file) => ({
+        path: file.path,
+        publicPath: file.publicPath,
+        contentType: file.contentType,
+        // Copy into a standalone ArrayBuffer for the Convex `v.bytes()` channel.
+        bytes: new Uint8Array(file.bytes).buffer,
+      })),
+    })),
   })
 }
 
 export async function getPublishedPageBySlug(
-  db: DbClient,
+  _db: DbClient,
   slug: string,
 ): Promise<PublishedPageSnapshot | null> {
-  const { rows } = await db<SnapshotQueryRow>`
-    select data_rows.id as row_id,
-           site_snapshots.site_json,
-           data_row_versions.runtime_assets_json,
-           site_snapshots.importmap_body,
-           site_snapshots.importmap_sha256
-    from data_rows
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    join site_snapshots on site_snapshots.id = data_row_versions.site_snapshot_id
-    where data_rows.table_id = 'pages'
-      and data_rows.slug = ${slug}
-      and data_rows.status = 'published'
-      and data_rows.deleted_at is null
-    limit 1
-  `
-  return rows[0] ? snapshotFromQueryRow(rows[0]) : null
+  const row = await getConvex().query(api.dataPublish.publishedPageBySlug, { slug })
+  return row ? snapshotFromQueryRow(row) : null
 }
 
 export async function getPublishedPageSnapshotById(
-  db: DbClient,
+  _db: DbClient,
   pageId: string,
 ): Promise<PublishedPageSnapshot | null> {
-  const { rows } = await db<SnapshotQueryRow>`
-    select data_rows.id as row_id,
-           site_snapshots.site_json,
-           data_row_versions.runtime_assets_json,
-           site_snapshots.importmap_body,
-           site_snapshots.importmap_sha256
-    from data_rows
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    join site_snapshots on site_snapshots.id = data_row_versions.site_snapshot_id
-    where data_rows.id = ${pageId}
-      and data_rows.table_id = 'pages'
-      and data_rows.status = 'published'
-      and data_rows.deleted_at is null
-    limit 1
-  `
-  return rows[0] ? snapshotFromQueryRow(rows[0]) : null
+  const row = await getConvex().query(api.dataPublish.publishedPageById, { pageId })
+  return row ? snapshotFromQueryRow(row) : null
 }
 
 export async function getLatestPublishedSiteSnapshot(
-  db: DbClient,
+  _db: DbClient,
 ): Promise<PublishedPageSnapshot | null> {
-  const { rows } = await db<SnapshotQueryRow>`
-    select data_rows.id as row_id,
-           site_snapshots.site_json,
-           data_row_versions.runtime_assets_json,
-           site_snapshots.importmap_body,
-           site_snapshots.importmap_sha256
-    from data_rows
-    join data_row_versions on data_row_versions.id = data_rows.active_version_id
-    join site_snapshots on site_snapshots.id = data_row_versions.site_snapshot_id
-    where data_rows.table_id = 'pages'
-      and data_rows.status = 'published'
-      and data_rows.deleted_at is null
-    order by data_rows.created_at asc
-    limit 1
-  `
-  return rows[0] ? snapshotFromQueryRow(rows[0]) : null
+  const row = await getConvex().query(api.dataPublish.latestPublishedSiteSnapshot, {})
+  return row ? snapshotFromQueryRow(row) : null
 }

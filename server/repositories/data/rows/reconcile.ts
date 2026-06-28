@@ -1,39 +1,29 @@
 /**
  * Roster reconcile — the shared write path behind the editor's incremental
- * saves (PUT /pages, /components, /layouts). One transaction that makes
- * storage match the client's roster: write the changed rows, soft-delete the
- * dropped ones.
+ * saves (PUT /pages, /components, /layouts). One atomic Convex mutation
+ * (`convex/dataRows.reconcileRoster`) that makes storage match the client's
+ * roster: write the changed rows, soft-delete the dropped ones
+ * (docs/CONVEX-MIGRATION.md §3 #9).
  *
- * Ordering inside the transaction is load-bearing because of the partial
- * unique index `data_rows_table_slug_active_idx (table_id, slug) where
- * deleted_at is null and slug <> ''`, which is enforced per statement:
+ * The load-bearing statement order is preserved inside that mutation:
  *
- *   1. Reap FIRST. A changed row may take the slug of a row this same
- *      request deletes (homepage swap + delete of the old homepage saved in
- *      one batch); the soft-delete frees the slug before any write needs it.
- *   2. Two-phase slug writes. Two changed rows may SWAP slugs (A↔B) — no
- *      in-place update order can avoid a transient collision, so rows whose
- *      slug changes are parked on the placeholder slug '' (exempt from the
- *      unique index) together with their cells, then all final slugs land in
- *      a second pass once every old slug is free.
- *
- * Creates run after the reaps and placeholder parks, at which point no
- * active row holds any of the batch's final slugs (validation rejected
- * collisions with kept rows before the transaction started).
+ *   1. Reap FIRST. A changed row may take the slug of a row this same request
+ *      deletes (homepage swap + delete of the old homepage in one batch); the
+ *      soft-delete frees the slug before any write needs it.
+ *   2. Two-phase slug writes. Two changed rows may SWAP slugs (A↔B); rows whose
+ *      slug changes are parked on the empty slug together with their cells,
+ *      then all final slugs land in a second pass once every old slug is free.
  *
  * A write whose id matches a SOFT-DELETED row revives that row instead of
- * inserting (the dead row still owns the primary key): undo of a delete
- * re-submits the page with its original id on the next save.
+ * inserting (undo of a delete re-submits the page with its original id).
+ *
+ * Convex port: a thin adapter. The signatures are frozen — the leading SQL
+ * `DbClient` handle is retained (named `_db`, intentionally unused). `rowsToReap`
+ * stays here as the pure reap predicate (the Convex mutation reimplements the
+ * same logic inline, since it cannot import this server module).
  */
 import type { DbClient } from '../../../db/client'
-import {
-  createDataRow,
-  updateDataRowDraftCells,
-  updateDataRowSlug,
-  resurrectDataRow,
-  softDeleteDataRow,
-} from './mutations'
-import { listDataRowIdSlugs, listSoftDeletedDataRowIds } from './read'
+import { api, getConvex } from '../../../convex/client'
 
 /**
  * Decide which existing rows to soft-delete during a roster reconcile.
@@ -41,8 +31,7 @@ import { listDataRowIdSlugs, listSoftDeletedDataRowIds } from './read'
  * With `baselineIds` (the row ids the saving client loaded), only reap a row
  * the client knew about and dropped — never a row another session created
  * concurrently, which the saving client never saw (ISS-041). With no baseline,
- * reap every row missing from the incoming set (authoritative full replace,
- * e.g. an import).
+ * reap every row missing from the incoming set (authoritative full replace).
  */
 export function rowsToReap(
   existingIds: Iterable<string>,
@@ -72,58 +61,19 @@ export interface ReconcileRowRosterInput {
 }
 
 /**
- * Reconcile a table's rows to the client's roster in one short transaction.
+ * Reconcile a table's rows to the client's roster in one atomic mutation.
  * Returns whether any reaped row was published — callers that own public
- * routes (pages) bump the publish version AFTER the transaction commits.
+ * routes (pages) bump the publish version AFTER the mutation commits.
  */
 export async function reconcileDataRowRoster(
-  db: DbClient,
+  _db: DbClient,
   { tableId, writes, keepIds, baselineIds, actorUserId }: ReconcileRowRosterInput,
 ): Promise<{ reapedPublished: boolean }> {
-  let reapedPublished = false
-
-  await db.transaction(async (tx) => {
-    const existing = await listDataRowIdSlugs(tx, tableId)
-    const existingSlugById = new Map(existing.map((r) => [r.id, r.slug]))
-    const softDeletedIds = new Set(await listSoftDeletedDataRowIds(tx, tableId))
-
-    // 1. Reap first — frees the slugs of dropped rows for the writes below.
-    for (const rowId of rowsToReap(existingSlugById.keys(), keepIds, baselineIds)) {
-      const deleted = await softDeleteDataRow(tx, rowId, actorUserId)
-      if (deleted?.status === 'published') reapedPublished = true
-    }
-
-    // 2. Write changed rows. Slug-changing updates park on '' (exempt from
-    //    the unique index) so within-batch swaps can't transiently collide.
-    //    A write whose id matches a SOFT-DELETED row is a revival (undo of a
-    //    delete) — a plain insert would hit that row's primary key, so it is
-    //    resurrected in place, parked, and re-slugged with the others.
-    const parked: RowRosterWrite[] = []
-    for (const write of writes) {
-      const storedSlug = existingSlugById.get(write.id)
-      if (storedSlug === undefined) continue // created or revived below
-      if (storedSlug === write.slug) {
-        await updateDataRowDraftCells(tx, write.id, { cells: write.cells, slug: write.slug }, actorUserId)
-      } else {
-        await updateDataRowDraftCells(tx, write.id, { cells: write.cells, slug: '' }, actorUserId)
-        parked.push(write)
-      }
-    }
-    for (const write of writes) {
-      if (existingSlugById.has(write.id)) continue
-      if (softDeletedIds.has(write.id)) {
-        await resurrectDataRow(tx, write.id, { cells: write.cells, slug: '' }, actorUserId)
-        parked.push(write)
-      } else {
-        await createDataRow(tx, { id: write.id, tableId, cells: write.cells, slug: write.slug }, actorUserId)
-      }
-    }
-
-    // 3. Final slugs for the parked rows — every old slug is free by now.
-    for (const write of parked) {
-      await updateDataRowSlug(tx, write.id, write.slug)
-    }
+  return getConvex().mutation(api.dataRows.reconcileRoster, {
+    tableId,
+    writes: writes.map((w) => ({ id: w.id, cells: w.cells, slug: w.slug })),
+    keepIds: [...keepIds],
+    baselineIds: baselineIds ? [...baselineIds] : undefined,
+    actorUserId,
   })
-
-  return { reapedPublished }
 }

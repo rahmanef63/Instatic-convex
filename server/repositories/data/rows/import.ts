@@ -6,11 +6,18 @@
  *   insertDataRowIfAbsent — insert only if id absent (merge-add)
  *   replaceDataRow        — plain insert after wipe (replace strategy)
  *
- * User reference columns (author, createdBy, etc.) are intentionally dropped
- * on import: the user ids from the source instance will not exist in the target.
+ * User reference columns (author, createdBy, etc.) are intentionally dropped on
+ * import: the user ids from the source instance will not exist in the target.
+ *
+ * Convex port: thin adapters over `convex/dataRows.ts`. Convex has no
+ * `ON CONFLICT`, so each upsert is a read-by-index → patch-or-insert inside one
+ * atomic mutation (§4.6). The signatures are frozen — the leading SQL
+ * `DbClient` handle is retained (named `_db`, intentionally unused). The
+ * created/updated timestamp defaults are computed here, exactly as before.
  */
 import type { DbClient } from '../../../db/client'
 import type { DataRowCells, DataRowStatus } from '@core/data/schemas'
+import { api, getConvex } from '../../../convex/client'
 
 export interface DataRowImportInput {
   id: string
@@ -23,33 +30,26 @@ export interface DataRowImportInput {
   updatedAt: string | null
 }
 
+function importArgs(input: DataRowImportInput) {
+  const now = new Date().toISOString()
+  return {
+    id: input.id,
+    tableId: input.tableId,
+    cells: input.cells,
+    slug: input.slug,
+    status: input.status,
+    publishedAt: input.publishedAt,
+    createdAt: input.createdAt ?? now,
+    updatedAt: input.updatedAt ?? now,
+  }
+}
+
 /**
- * Upsert a row preserving its original id, status, and timestamps. Used by
- * the `merge-overwrite` and `replace` import strategies.
+ * Upsert a row preserving its original id, status, and timestamps. Used by the
+ * `merge-overwrite` and `replace` import strategies.
  */
-export async function upsertDataRow(
-  db: DbClient,
-  input: DataRowImportInput,
-): Promise<void> {
-  const createdAt = input.createdAt ?? new Date().toISOString()
-  const updatedAt = input.updatedAt ?? new Date().toISOString()
-  await db`
-    insert into data_rows (
-      id, table_id, cells_json, slug, status,
-      published_at, created_at, updated_at
-    )
-    values (
-      ${input.id}, ${input.tableId}, ${input.cells}, ${input.slug}, ${input.status},
-      ${input.publishedAt}, ${createdAt}, ${updatedAt}
-    )
-    on conflict (id) do update
-      set table_id    = excluded.table_id,
-          cells_json  = excluded.cells_json,
-          slug        = excluded.slug,
-          status      = excluded.status,
-          published_at = excluded.published_at,
-          updated_at  = excluded.updated_at
-  `
+export async function upsertDataRow(_db: DbClient, input: DataRowImportInput): Promise<void> {
+  await getConvex().mutation(api.dataRows.importUpsert, importArgs(input))
 }
 
 /**
@@ -57,50 +57,18 @@ export async function upsertDataRow(
  * the row was inserted, `false` when it was skipped (id conflict, or an active
  * row in the same table already owns the imported slug). Used by the
  * `merge-add` import strategy.
- *
- * RETURNING id is supported by both Postgres and SQLite, making this dialect-
- * neutral while still reporting whether an insert actually happened.
  */
 export async function insertDataRowIfAbsent(
-  db: DbClient,
+  _db: DbClient,
   input: DataRowImportInput,
 ): Promise<boolean> {
-  const createdAt = input.createdAt ?? new Date().toISOString()
-  const updatedAt = input.updatedAt ?? new Date().toISOString()
-  const { rows } = await db<{ id: string }>`
-    insert into data_rows (
-      id, table_id, cells_json, slug, status,
-      published_at, created_at, updated_at
-    )
-    values (
-      ${input.id}, ${input.tableId}, ${input.cells}, ${input.slug}, ${input.status},
-      ${input.publishedAt}, ${createdAt}, ${updatedAt}
-    )
-    on conflict do nothing
-    returning id
-  `
-  return rows.length > 0
+  return getConvex().mutation(api.dataRows.importInsertIfAbsent, importArgs(input))
 }
 
 /**
- * Plain INSERT with no conflict handling. Assumes the caller has already wiped
- * the table (as the `replace` strategy does). Returns void — the caller does
- * not need the inserted row shape.
+ * Plain insert with no conflict handling. Assumes the caller has already wiped
+ * the table (as the `replace` strategy does).
  */
-export async function replaceDataRow(
-  db: DbClient,
-  input: DataRowImportInput,
-): Promise<void> {
-  const createdAt = input.createdAt ?? new Date().toISOString()
-  const updatedAt = input.updatedAt ?? new Date().toISOString()
-  await db`
-    insert into data_rows (
-      id, table_id, cells_json, slug, status,
-      published_at, created_at, updated_at
-    )
-    values (
-      ${input.id}, ${input.tableId}, ${input.cells}, ${input.slug}, ${input.status},
-      ${input.publishedAt}, ${createdAt}, ${updatedAt}
-    )
-  `
+export async function replaceDataRow(_db: DbClient, input: DataRowImportInput): Promise<void> {
+  await getConvex().mutation(api.dataRows.importReplace, importArgs(input))
 }

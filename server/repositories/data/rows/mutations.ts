@@ -3,288 +3,158 @@
  *
  *   createDataRow        — insert a new draft
  *   saveDataRowDraft     — overwrite the draft cells and slug
+ *   updateDataRowDraftCells — the write half of saveDataRowDraft, no re-read
  *   softDeleteDataRow    — set deleted_at
  *   updateDataRowTable   — move a row to another table (rejects on slug conflict)
  *   updateDataRowStatus  — flip between draft / unpublished
  *   updateDataRowAuthor  — reassign the author user id
  *
- * Mutations (other than soft-delete) always RETURN id only, then re-read the
- * hydrated row through `getDataRow` so callers receive consistently populated
- * user references. Soft-delete is the exception: a soft-deleted row is filtered
- * out by `getDataRow`'s `deleted_at is null` clause, so the row is mapped
- * directly from RETURNING. Because RETURNING carries no user-ref joins, the
- * result is a narrow `DeletedRowSummary` (not a `DataRow`) — the delete callers
- * only consume id / tableId / slug / status / deletedAt.
+ * Convex port: thin adapters over `convex/dataRows.ts`. The signatures are
+ * frozen — the leading SQL `DbClient` handle is retained (named `_db`,
+ * intentionally unused). Each hydrated read/write returns a joined row that
+ * `mapRow` (→ the shared `userRefAt`) turns into a `DataRow`. Soft-delete is
+ * the exception: it returns the narrow `DeletedRowSummary` directly (a
+ * soft-deleted row carries no hydrated user refs).
+ *
+ * The public render-cache bump (`bumpPublishVersionSerialized`) stays on the
+ * Bun side and runs AFTER the Convex mutation — it touches the server's
+ * in-memory publish state, not the database.
  */
-import { nanoid } from 'nanoid'
 import type { DbClient } from '../../../db/client'
-import type { DataRow, DataRowStatus, DeletedRowSummary } from '@core/data/schemas'
+import type { DataRow, DeletedRowSummary } from '@core/data/schemas'
 import { bumpPublishVersionSerialized } from '../../../publish/publishState'
-import { type InsertDataRowInput, type UpdateDataRowDraftInput } from './mapper'
-import { isoDateOrNull } from '@core/utils/isoDate'
-import { getDataRow } from './read'
+import { api, getConvex } from '../../../convex/client'
+import { mapRow, type InsertDataRowInput, type UpdateDataRowDraftInput } from './mapper'
 
 type UpdateDataRowTableResult =
   | { ok: true; row: DataRow }
   | { ok: false; reason: 'row_not_found' | 'table_not_found' | 'slug_conflict' }
 
 export async function createDataRow(
-  db: DbClient,
+  _db: DbClient,
   input: InsertDataRowInput,
   actorUserId: string | null = null,
   pluginActorId: string | null = null,
 ): Promise<DataRow> {
-  const { rows } = await db<{ id: string }>`
-    insert into data_rows (
-      id,
-      table_id,
-      cells_json,
-      slug,
-      status,
-      author_user_id,
-      created_by_user_id,
-      updated_by_user_id,
-      plugin_actor_id
-    )
-    values (
-      ${input.id ?? nanoid()},
-      ${input.tableId},
-      ${input.cells},
-      ${input.slug},
-      ${'draft'},
-      ${actorUserId},
-      ${actorUserId},
-      ${actorUserId},
-      ${pluginActorId}
-    )
-    returning id
-  `
-  const created = await getDataRow(db, rows[0].id)
-  if (!created) throw new Error('data row was created but could not be re-read')
-  return created
+  const row = await getConvex().mutation(api.dataRows.create, {
+    id: input.id,
+    tableId: input.tableId,
+    cells: input.cells,
+    slug: input.slug,
+    actorUserId,
+    pluginActorId,
+  })
+  if (!row) throw new Error('data row was created but could not be re-read')
+  return mapRow(row)
 }
 
 export async function saveDataRowDraft(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   input: UpdateDataRowDraftInput,
   actorUserId: string | null = null,
   pluginActorId: string | null = null,
 ): Promise<DataRow | null> {
-  const updated = await updateDataRowDraftCells(db, rowId, input, actorUserId, pluginActorId)
-  return updated ? getDataRow(db, rowId) : null
+  const row = await getConvex().mutation(api.dataRows.saveDraft, {
+    rowId,
+    cells: input.cells,
+    slug: input.slug,
+    actorUserId,
+    pluginActorId,
+  })
+  return row ? mapRow(row) : null
 }
 
 /**
  * The write half of `saveDataRowDraft`, without the hydrated re-read. The
- * roster reconcilers (PUT /pages, PUT /components) discard the row anyway —
- * re-reading every saved row through the user-ref joins doubled their query
- * count per save. Returns whether a (non-deleted) row matched.
+ * roster reconcilers discard the row anyway. Returns whether a (non-deleted)
+ * row matched.
  */
 export async function updateDataRowDraftCells(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   input: UpdateDataRowDraftInput,
   actorUserId: string | null = null,
   pluginActorId: string | null = null,
 ): Promise<boolean> {
-  const { rows } = await db<{ id: string }>`
-    update data_rows
-    set cells_json = ${input.cells},
-        slug = ${input.slug},
-        updated_by_user_id = ${actorUserId},
-        plugin_actor_id = ${pluginActorId},
-        updated_at = current_timestamp
-    where id = ${rowId}
-      and deleted_at is null
-    returning id
-  `
-  return rows.length > 0
+  return getConvex().mutation(api.dataRows.updateDraftCells, {
+    rowId,
+    cells: input.cells,
+    slug: input.slug,
+    actorUserId,
+    pluginActorId,
+  })
 }
 
 /**
- * Revive a soft-deleted row with fresh draft cells — the roster reconcile's
- * answer to a client re-submitting an id it previously reaped (undo of a
- * delete). Clears `deleted_at` and overwrites cells/slug; the row keeps its
- * pre-delete status (publish state transitions stay with the publish flow).
- */
-export async function resurrectDataRow(
-  db: DbClient,
-  rowId: string,
-  input: UpdateDataRowDraftInput,
-  actorUserId: string | null = null,
-): Promise<void> {
-  await db`
-    update data_rows
-    set deleted_at = null,
-        cells_json = ${input.cells},
-        slug = ${input.slug},
-        updated_by_user_id = ${actorUserId},
-        updated_at = current_timestamp
-    where id = ${rowId}
-      and deleted_at is not null
-  `
-}
-
-/**
- * Slug-only write — the second phase of the roster reconcile's two-phase
- * slug update (see rows/reconcile.ts). The row's cells and audit columns were
- * already written by `updateDataRowDraftCells` in the same transaction; this
- * just moves the row off the placeholder slug onto its final one.
- */
-export async function updateDataRowSlug(
-  db: DbClient,
-  rowId: string,
-  slug: string,
-): Promise<void> {
-  await db`
-    update data_rows
-    set slug = ${slug}
-    where id = ${rowId}
-      and deleted_at is null
-  `
-}
-
-/**
- * Soft-delete is the one mutation that returns the row directly from
- * RETURNING rather than re-reading via `getDataRow`: the row now has
- * `deleted_at` set, so `getDataRow`'s `deleted_at is null` filter would mask
- * it. RETURNING carries no user-ref joins, so the result cannot be a hydrated
- * `DataRow` — it is a narrow `DeletedRowSummary` (id / tableId / slug / status /
- * deletedAt), which is all the soft-delete callers consume (audit logging +
- * artefact pruning).
+ * Soft-delete returns the narrow `DeletedRowSummary` (id / tableId / slug /
+ * status / deletedAt) — all the soft-delete callers consume (audit logging +
+ * artefact pruning). A soft-deleted row carries no user-ref joins, so it cannot
+ * be a hydrated `DataRow`.
  */
 export async function softDeleteDataRow(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   actorUserId: string | null = null,
 ): Promise<DeletedRowSummary | null> {
-  const { rows } = await db<{
-    id: string
-    table_id: string
-    slug: string
-    status: DataRowStatus
-    deleted_at: string | Date | null
-  }>`
-    update data_rows
-    set deleted_at = current_timestamp,
-        updated_by_user_id = ${actorUserId},
-        updated_at = current_timestamp
-    where id = ${rowId}
-      and deleted_at is null
-    returning id, table_id, slug, status, deleted_at
-  `
-  const row = rows[0]
-  if (!row) return null
-  return {
-    id: row.id,
-    tableId: row.table_id,
-    slug: row.slug,
-    status: row.status,
-    deletedAt: isoDateOrNull(row.deleted_at),
-  }
+  return getConvex().mutation(api.dataRows.softDelete, { rowId, actorUserId })
 }
 
 /**
  * Move a row to another table. Refuses if the target table is missing or
  * already has a non-deleted row with the same (non-empty) slug. Returns a
  * discriminated union so handlers can map each failure mode to the right HTTP
- * status.
+ * status. Moving a published row changes its public route, so the render cache
+ * is invalidated AFTER the move commits.
  */
 export async function updateDataRowTable(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   tableId: string,
   actorUserId: string | null = null,
 ): Promise<UpdateDataRowTableResult> {
-  const row = await getDataRow(db, rowId)
-  if (!row) return { ok: false, reason: 'row_not_found' }
-  if (row.tableId === tableId) return { ok: true, row }
-
-  const { rows: tableRows } = await db<{ id: string }>`
-    select id from data_tables
-    where id = ${tableId}
-      and deleted_at is null
-    limit 1
-  `
-  if (!tableRows[0]) return { ok: false, reason: 'table_not_found' }
-
-  // Only check for slug conflicts when the row has a non-empty slug.
-  if (row.slug) {
-    const { rows: conflictRows } = await db<{ id: string }>`
-      select id from data_rows
-      where table_id = ${tableId}
-        and slug = ${row.slug}
-        and id <> ${rowId}
-        and deleted_at is null
-      limit 1
-    `
-    if (conflictRows[0]) return { ok: false, reason: 'slug_conflict' }
-  }
-
-  const { rows } = await db<{ id: string }>`
-    update data_rows
-    set table_id = ${tableId},
-        updated_by_user_id = ${actorUserId},
-        updated_at = current_timestamp
-    where id = ${rowId}
-      and deleted_at is null
-    returning id
-  `
-  if (!rows[0]) return { ok: false, reason: 'row_not_found' }
-  const updated = await getDataRow(db, rows[0].id)
-  if (!updated) return { ok: false, reason: 'row_not_found' }
-  // Moving a published row changes its public route (the route base comes
-  // from the table) — invalidate the render cache so the old URL stops
-  // being served.
-  if (row.status === 'published') await bumpPublishVersionSerialized()
-  return { ok: true, row: updated }
+  const result = await getConvex().mutation(api.dataRows.updateTable, {
+    rowId,
+    tableId,
+    actorUserId,
+  })
+  if (!result.ok) return { ok: false, reason: result.reason }
+  if (result.wasPublished) await bumpPublishVersionSerialized()
+  return { ok: true, row: mapRow(result.row) }
 }
 
 /**
  * Flip a row between `draft` and `unpublished` (the only states reachable
  * from this endpoint — `published` goes through the dedicated publish flow).
- * Always clears publish and schedule metadata since neither remains meaningful
- * in the retracted state.
+ * Always clears publish and schedule metadata.
  */
 export async function updateDataRowStatus(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   status: 'draft' | 'unpublished',
   actorUserId: string | null = null,
 ): Promise<DataRow | null> {
-  const { rows } = await db<{ id: string }>`
-    update data_rows
-    set status = ${status},
-        published_at = null,
-        published_by_user_id = null,
-        scheduled_publish_at = null,
-        updated_by_user_id = ${actorUserId},
-        updated_at = current_timestamp
-    where id = ${rowId}
-      and deleted_at is null
-    returning id
-  `
-  if (!rows[0]) return null
+  const row = await getConvex().mutation(api.dataRows.updateStatus, {
+    rowId,
+    status,
+    actorUserId,
+  })
+  if (!row) return null
   // Invalidate the render cache — the route's published state changed.
   await bumpPublishVersionSerialized()
-  return getDataRow(db, rows[0].id)
+  return mapRow(row)
 }
 
 export async function updateDataRowAuthor(
-  db: DbClient,
+  _db: DbClient,
   rowId: string,
   authorUserId: string,
   actorUserId: string | null = null,
 ): Promise<DataRow | null> {
-  const { rows } = await db<{ id: string }>`
-    update data_rows
-    set author_user_id = ${authorUserId},
-        updated_by_user_id = ${actorUserId},
-        updated_at = current_timestamp
-    where id = ${rowId}
-      and deleted_at is null
-    returning id
-  `
-  return rows[0] ? getDataRow(db, rows[0].id) : null
+  const row = await getConvex().mutation(api.dataRows.updateAuthor, {
+    rowId,
+    authorUserId,
+    actorUserId,
+  })
+  return row ? mapRow(row) : null
 }
