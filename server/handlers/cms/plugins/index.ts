@@ -34,13 +34,11 @@
  * (`pluginsPayload`, audit envelope, permission grants, on-disk assets)
  * live in `shared.ts`.
  */
-import type { DbClient } from '../../../db/client'
 import type { CoreCapability } from '../../../auth/capabilities'
 import type { AuthUser } from '../../../repositories/users'
 import { requireCapability, requireStepUp } from '../../../auth/authz'
 import {
   handleServerPluginRuntimeRequest,
-  setPluginWorkerDbClient,
 } from '../../../plugins/runtime'
 import { jsonResponse } from '../../../http'
 import { type CmsHandlerOptions } from '../shared'
@@ -184,7 +182,7 @@ function resolvePluginRoutePolicy(method: string, pathname: string): PluginRoute
 // ---------------------------------------------------------------------------
 // Route table
 //
-// Thin adapters map the route table's `(req, db, params, options, user)` shape
+// Thin adapters map the route table's `(req, params, options, user)` shape
 // onto each handler's native positional signature. Order mirrors the original
 // dispatcher: exact paths and nested/specific patterns before the bare
 // `/plugins/:id` item route. Multi-method paths (`/plugins` GET+POST,
@@ -197,25 +195,25 @@ function resolvePluginRoutePolicy(method: string, pathname: string): PluginRoute
 const PLUGIN_ADMIN_PATH = '/admin/api/cms/plugins'
 
 const PLUGIN_ROUTES: readonly Route<[CmsHandlerOptions, AuthUser]>[] = [
-  { method: 'GET', pattern: PLUGIN_ADMIN_PATH, handler: (req, db, _p, _o, user) => handlePluginsCollection(req, db, user) },
-  { method: 'POST', pattern: PLUGIN_ADMIN_PATH, handler: (req, db, _p, _o, user) => handlePluginsCollection(req, db, user) },
+  { method: 'GET', pattern: PLUGIN_ADMIN_PATH, handler: (req, _p, _o, user) => handlePluginsCollection(req, user) },
+  { method: 'POST', pattern: PLUGIN_ADMIN_PATH, handler: (req, _p, _o, user) => handlePluginsCollection(req, user) },
   { method: 'POST', pattern: `${PLUGIN_ADMIN_PATH}/inspect-package`, handler: (req) => handleInspectPackage(req) },
-  { method: 'POST', pattern: `${PLUGIN_ADMIN_PATH}/package`, handler: (req, db, _p, options, user) => handlePackageInstall(req, db, options, user) },
-  { method: 'POST', pattern: PLUGIN_PACK_INSTALL_PATTERN, handler: (req, db, p, options, user) => handlePluginPackInstall(req, db, options, user, p.id) },
-  { method: 'GET', pattern: PLUGIN_SETTINGS_PATTERN, handler: (req, db, p, _o, user) => handlePluginSettings(req, db, user, p.id) },
-  { method: 'PUT', pattern: PLUGIN_SETTINGS_PATTERN, handler: (req, db, p, _o, user) => handlePluginSettings(req, db, user, p.id) },
-  { method: 'POST', pattern: PLUGIN_RESTART_PATTERN, handler: (req, db, p, options, user) => handlePluginRestart(req, db, options, user, p.id) },
-  { method: 'POST', pattern: PLUGIN_SCHEDULE_RUN_NOW_PATTERN, handler: (req, db, p) => handlePluginScheduleRunNow(req, db, p.id, p.sid) },
-  { method: 'POST', pattern: PLUGIN_SCHEDULE_PAUSE_PATTERN, handler: (req, db, p) => handlePluginSchedulePause(req, db, p.id, p.sid) },
-  { method: 'POST', pattern: PLUGIN_SCHEDULE_RESUME_PATTERN, handler: (req, db, p) => handlePluginScheduleResume(req, db, p.id, p.sid) },
-  { method: 'GET', pattern: PLUGIN_SCHEDULES_PATTERN, handler: (req, db, p) => handlePluginSchedulesList(req, db, p.id) },
+  { method: 'POST', pattern: `${PLUGIN_ADMIN_PATH}/package`, handler: (req, _p, options, user) => handlePackageInstall(req, options, user) },
+  { method: 'POST', pattern: PLUGIN_PACK_INSTALL_PATTERN, handler: (req, p, options, user) => handlePluginPackInstall(req, options, user, p.id) },
+  { method: 'GET', pattern: PLUGIN_SETTINGS_PATTERN, handler: (req, p, _o, user) => handlePluginSettings(req, user, p.id) },
+  { method: 'PUT', pattern: PLUGIN_SETTINGS_PATTERN, handler: (req, p, _o, user) => handlePluginSettings(req, user, p.id) },
+  { method: 'POST', pattern: PLUGIN_RESTART_PATTERN, handler: (req, p, options, user) => handlePluginRestart(req, options, user, p.id) },
+  { method: 'POST', pattern: PLUGIN_SCHEDULE_RUN_NOW_PATTERN, handler: (req, p) => handlePluginScheduleRunNow(req, p.id, p.sid) },
+  { method: 'POST', pattern: PLUGIN_SCHEDULE_PAUSE_PATTERN, handler: (req, p) => handlePluginSchedulePause(req, p.id, p.sid) },
+  { method: 'POST', pattern: PLUGIN_SCHEDULE_RESUME_PATTERN, handler: (req, p) => handlePluginScheduleResume(req, p.id, p.sid) },
+  { method: 'GET', pattern: PLUGIN_SCHEDULES_PATTERN, handler: (req, p) => handlePluginSchedulesList(req, p.id) },
   { method: 'GET', pattern: PLUGIN_EVENTS_PATH, handler: async (req) => handlePluginEventsStream(req) },
-  { method: 'PATCH', pattern: PLUGIN_RECORD_ITEM_PATTERN, handler: (req, db, p) => handlePluginRecordItem(req, db, p.id, p.rid, p.rec) },
-  { method: 'DELETE', pattern: PLUGIN_RECORD_ITEM_PATTERN, handler: (req, db, p) => handlePluginRecordItem(req, db, p.id, p.rid, p.rec) },
-  { method: 'GET', pattern: PLUGIN_RECORDS_PATTERN, handler: (req, db, p) => handlePluginRecordsCollection(req, db, p.id, p.rid) },
-  { method: 'POST', pattern: PLUGIN_RECORDS_PATTERN, handler: (req, db, p) => handlePluginRecordsCollection(req, db, p.id, p.rid) },
-  { method: 'PATCH', pattern: PLUGIN_ITEM_DISPATCH_PATTERN, handler: (req, db, p, options, user) => handlePluginItem(req, db, options, user, p.id) },
-  { method: 'DELETE', pattern: PLUGIN_ITEM_DISPATCH_PATTERN, handler: (req, db, p, options, user) => handlePluginItem(req, db, options, user, p.id) },
+  { method: 'PATCH', pattern: PLUGIN_RECORD_ITEM_PATTERN, handler: (req, p) => handlePluginRecordItem(req, p.id, p.rid, p.rec) },
+  { method: 'DELETE', pattern: PLUGIN_RECORD_ITEM_PATTERN, handler: (req, p) => handlePluginRecordItem(req, p.id, p.rid, p.rec) },
+  { method: 'GET', pattern: PLUGIN_RECORDS_PATTERN, handler: (req, p) => handlePluginRecordsCollection(req, p.id, p.rid) },
+  { method: 'POST', pattern: PLUGIN_RECORDS_PATTERN, handler: (req, p) => handlePluginRecordsCollection(req, p.id, p.rid) },
+  { method: 'PATCH', pattern: PLUGIN_ITEM_DISPATCH_PATTERN, handler: (req, p, options, user) => handlePluginItem(req, options, user, p.id) },
+  { method: 'DELETE', pattern: PLUGIN_ITEM_DISPATCH_PATTERN, handler: (req, p, options, user) => handlePluginItem(req, options, user, p.id) },
 ]
 
 // ---------------------------------------------------------------------------
@@ -224,18 +222,9 @@ const PLUGIN_ROUTES: readonly Route<[CmsHandlerOptions, AuthUser]>[] = [
 
 export async function handlePluginsRoutes(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
 ): Promise<Response | null> {
   const { pathname } = new URL(req.url)
-
-  // Make sure the plugin worker host knows the current DbClient before any
-  // worker-initiated `cms.storage.*` round-trip lands. Idempotent; the host
-  // just stores the reference. Required because `activateInstalledServerPlugins`
-  // (the canonical setter) only runs at boot and after disable/enable cycles —
-  // without this call, a fresh install or upgrade would see api dispatches
-  // fail with "no DbClient configured" until the next boot.
-  setPluginWorkerDbClient(db)
 
   // Plugin runtime is a pass-through to the plugin's own server module — its
   // capability gating lives inside `handleServerPluginRuntimeRequest` because
@@ -243,7 +232,7 @@ export async function handlePluginsRoutes(
   // before the admin gate, for any method.
   if (PLUGIN_RUNTIME_PATTERN.test(pathname)) {
     return (
-      (await handleServerPluginRuntimeRequest(req, db)) ??
+      (await handleServerPluginRuntimeRequest(req)) ??
       jsonResponse({ error: 'Plugin route not found' }, { status: 404 })
     )
   }
@@ -255,14 +244,14 @@ export async function handlePluginsRoutes(
   // table as extra context.
   if (!isPluginAdminPath(pathname)) return null
   const policy = resolvePluginRoutePolicy(req.method, pathname)
-  const user = await requireCapability(req, db, policy.capability)
+  const user = await requireCapability(req, policy.capability)
   if (user instanceof Response) return user
   if (policy.stepUp) {
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
   }
 
-  return runRouteTable(req, db, PLUGIN_ROUTES, options, user)
+  return runRouteTable(req, PLUGIN_ROUTES, options, user)
 }
 
 /**

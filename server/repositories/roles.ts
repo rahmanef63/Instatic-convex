@@ -6,11 +6,8 @@
  * UI manages them through the `roles.manage` capability.
  *
  * Convex port: this file is now a thin adapter over `convex/roles.ts` (see
- * docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged while the rest of the runtime is
- * still on the SQL path; the bodies read/write through the shared `getConvex()`
- * handle instead. It is dropped wholesale when `server/db/*` is retired (§7).
+ * docs/CONVEX-MIGRATION.md §2). The bodies read/write through the shared
+ * `getConvex()` handle.
  *
  * Two concerns stay on the server side of the boundary, because they depend on
  * server-only constants that cannot be bundled into Convex:
@@ -30,7 +27,6 @@
  */
 
 import { ConvexError } from 'convex/values'
-import type { DbClient } from '../db/client'
 import {
   FORCE_SYNC_ROLE_IDS,
   normalizeCapabilities,
@@ -107,13 +103,12 @@ function compareRolesByRank(a: Role, b: Role): number {
   return a.name.localeCompare(b.name)
 }
 
-export async function listRoles(_db: DbClient): Promise<Role[]> {
+export async function listRoles(): Promise<Role[]> {
   const roles = await getConvex().query(api.roles.list, {})
   return roles.map(toRole).sort(compareRolesByRank)
 }
 
 export async function createCustomRole(
-  _db: DbClient,
   input: {
     name: string
     slug?: string
@@ -145,7 +140,6 @@ export async function createCustomRole(
  *    structural invariant of the installation
  */
 export async function updateRole(
-  _db: DbClient,
   roleId: string,
   input: {
     name?: string
@@ -173,7 +167,7 @@ export async function updateRole(
  * are part of the installation's expected role registry. Use `updateRole`
  * to edit a non-owner system role's name/capabilities instead.
  */
-export async function deleteCustomRole(_db: DbClient, roleId: string): Promise<Role | null> {
+export async function deleteCustomRole(roleId: string): Promise<Role | null> {
   try {
     const role = await getConvex().mutation(api.roles.deleteCustom, { roleId })
     return role ? toRole(role) : null
@@ -206,7 +200,7 @@ export async function deleteCustomRole(_db: DbClient, roleId: string): Promise<R
  *
  * Called from `server/index.ts` at boot.
  */
-export async function syncSystemRoles(_db: DbClient): Promise<void> {
+export async function syncSystemRoles(): Promise<void> {
   await getConvex().mutation(api.roles.sync, {
     roles: SYSTEM_ROLES.map((role) => ({
       id: role.id,

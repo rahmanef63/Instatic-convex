@@ -32,7 +32,6 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { nanoid } from 'nanoid'
 import { assertPathWithin } from '../util/pathWithin'
-import type { DbClient } from '../db/client'
 import {
   getInstalledPlugin,
   listInstalledPlugins,
@@ -50,7 +49,6 @@ import { jsonResponse } from '../http'
 import { hookBus } from '@core/plugins/hookBus'
 import { requireAuthenticatedUser, requireCapability } from '../auth/authz'
 import { clearPluginCrashCounter, setCrashRecoveryHandler } from './host/crashRecovery'
-import { setPluginWorkerDbClient } from './host/registry'
 import {
   findPluginRouteAccess,
   loadPluginInWorker,
@@ -74,10 +72,6 @@ setApiCallDispatcher(dispatchApiCall)
 // Re-export for callers that orchestrate manual restart (resets the
 // per-plugin crash counter so the next failure starts a fresh budget).
 export { clearPluginCrashCounter }
-
-// Re-export the host's setter so the server entry point can wire in the
-// DbClient at boot before any request arrives.
-export { setPluginWorkerDbClient }
 
 // Settings cache lives in `settingsCache.ts` — the cached record merges the
 // decrypted secret settings (plugin_secrets) over `plugin.settings`, and is
@@ -142,14 +136,13 @@ export async function loadPluginServerEntrypoint(
  * against a handler that no longer exists in the VM.
  */
 export async function runPluginLifecycle(
-  db: DbClient,
   pluginId: string,
   hook: 'install' | 'activate' | 'deactivate' | 'uninstall',
 ): Promise<void> {
   const startedAtIso = new Date().toISOString()
   await runLifecycleInWorker(pluginId, hook)
   if (hook === 'activate') {
-    await disableSchedulesNotReclaimedSince(db, pluginId, startedAtIso)
+    await disableSchedulesNotReclaimedSince(pluginId, startedAtIso)
   }
 }
 
@@ -208,7 +201,6 @@ export async function loadPluginModulePack(
 
 export async function handleServerPluginRuntimeRequest(
   req: Request,
-  db: DbClient,
 ): Promise<Response | null> {
   const url = new URL(req.url)
   const match = url.pathname.match(/^\/admin\/api\/cms\/plugins\/([^/]+)\/runtime(\/.*)?$/)
@@ -231,11 +223,11 @@ export async function handleServerPluginRuntimeRequest(
   let user: Awaited<ReturnType<typeof requireCapability>> | Response | null
   switch (route.access.kind) {
     case 'capability':
-      user = await requireCapability(req, db, route.access.capability)
+      user = await requireCapability(req, route.access.capability)
       if (user instanceof Response) return user
       break
     case 'authenticated':
-      user = await requireAuthenticatedUser(req, db)
+      user = await requireAuthenticatedUser(req)
       if (user instanceof Response) return user
       break
     case 'public':
@@ -264,12 +256,11 @@ export async function handleServerPluginRuntimeRequest(
  * "Restart Plugin" admin endpoint.
  */
 export async function reloadAndActivatePlugin(
-  db: DbClient,
   pluginId: string,
   uploadsDir?: string,
 ): Promise<void> {
   if (!uploadsDir) return
-  const result = await getInstalledPlugin(db, pluginId)
+  const result = await getInstalledPlugin(pluginId)
   // Broken manifest or not found: nothing safe to reload. Callers that need
   // to distinguish these cases (e.g. the restart handler) check the result
   // before calling this helper.
@@ -283,27 +274,27 @@ export async function reloadAndActivatePlugin(
   // Refresh the in-memory settings cache from the canonical rows (including
   // decrypted secrets) before the worker mirror gets seeded — keeps the
   // worker in sync if settings drifted since the last activation.
-  await primePluginSettingsCache(db, plugin)
+  await primePluginSettingsCache(plugin)
   if (manifest.entrypoints?.server) {
     const loaded = await loadPluginServerEntrypoint(manifest, uploadsDir)
-    if (loaded) await runPluginLifecycle(db, manifest.id, 'activate')
+    if (loaded) await runPluginLifecycle(manifest.id, 'activate')
   }
 }
 
 /**
  * Register the crash recovery handler with the worker host. Called from
- * `activateInstalledServerPlugins` so the host has a live `db + uploadsDir`
- * pair to reload plugins with after a crash. Each invocation replaces the
- * previous handler (idempotent — safe to call on every boot / re-bind).
+ * `activateInstalledServerPlugins` so the host has a live `uploadsDir` to
+ * reload plugins with after a crash. Each invocation replaces the previous
+ * handler (idempotent — safe to call on every boot / re-bind).
  */
-function registerCrashRecoveryHandler(db: DbClient, uploadsDir: string): void {
+function registerCrashRecoveryHandler(uploadsDir: string): void {
   setCrashRecoveryHandler(async ({ pluginId, reason, decision }) => {
     const occurredAt = new Date().toISOString()
 
     // Persist the crash event so the admin UI can show it. Best-effort —
     // a DB error here shouldn't block the recovery flow.
     try {
-      await recordPluginCrash(db, {
+      await recordPluginCrash({
         id: nanoid(),
         pluginId,
         reason,
@@ -330,7 +321,6 @@ function registerCrashRecoveryHandler(db: DbClient, uploadsDir: string): void {
         `[plugin:${pluginId}] crashed ${decision.recentCrashCount} times in the last 5 minutes; parking in error state`,
       )
       await setPluginLifecycleStatus(
-        db,
         pluginId,
         'error',
         `Crash budget exceeded (${decision.recentCrashCount} crashes in 5 min). Last reason: ${reason}`,
@@ -351,7 +341,7 @@ function registerCrashRecoveryHandler(db: DbClient, uploadsDir: string): void {
       `[plugin:${pluginId}] crash #${decision.recentCrashCount} in window — auto-respawning. Last reason: ${reason}`,
     )
     try {
-      await reloadAndActivatePlugin(db, pluginId, uploadsDir)
+      await reloadAndActivatePlugin(pluginId, uploadsDir)
       broadcastPluginEvent({
         kind: 'recovered',
         pluginId,
@@ -369,16 +359,11 @@ function registerCrashRecoveryHandler(db: DbClient, uploadsDir: string): void {
 }
 
 export async function activateInstalledServerPlugins(
-  db: DbClient,
   uploadsDir?: string,
 ): Promise<void> {
   if (!uploadsDir) return
 
-  // Make sure the worker host can reach the DbClient — required before any
-  // worker-initiated `cms.storage.*` round-trip lands. Idempotent; safe to
-  // call on every boot.
-  setPluginWorkerDbClient(db)
-  registerCrashRecoveryHandler(db, uploadsDir)
+  registerCrashRecoveryHandler(uploadsDir)
 
   // Reset existing in-process state so a re-bind (from `bun --watch`
   // reload, dev-mode hot path, or a full restart) starts from a clean
@@ -388,19 +373,16 @@ export async function activateInstalledServerPlugins(
   hookBus.reset()
 
   // Start the scheduler tick. Idempotent — a re-bind with the same
-  // process keeps the existing interval pointed at the same DbClient.
-  // (We deliberately do NOT stop and restart, to avoid the brief gap
-  // where a scheduled fire could land on an unbound DbClient.)
+  // process keeps the existing interval running.
   const { startScheduler } = await import('./scheduler')
-  startScheduler(db)
+  startScheduler()
 
   // Same idempotency contract as the plugin scheduler — boot path,
-  // re-bind, hot reload all converge on a single running tick pointed
-  // at the current DbClient.
+  // re-bind, hot reload all converge on a single running tick.
   const { startPublishScheduler } = await import('../publish/publishScheduler')
-  startPublishScheduler(db, uploadsDir)
+  startPublishScheduler(uploadsDir)
 
-  const results = await listInstalledPlugins(db)
+  const results = await listInstalledPlugins()
   for (const result of results) {
     // Phase: manifest-validation — the stored manifest_json failed to parse.
     // Mark the plugin as broken in the DB so the admin UI surfaces the error,
@@ -409,7 +391,7 @@ export async function activateInstalledServerPlugins(
     if (result.kind === 'broken') {
       console.error(`[plugin:${result.id}] boot manifest-validation failed: ${result.reason}`)
       try {
-        await setPluginLifecycleStatus(db, result.id, 'error', result.reason)
+        await setPluginLifecycleStatus(result.id, 'error', result.reason)
       } catch (dbErr) {
         console.error(`[plugin:${result.id}] failed to persist boot manifest error:`, dbErr)
       }
@@ -428,7 +410,7 @@ export async function activateInstalledServerPlugins(
     // — `loadPluginInWorker` reads the cached record (non-secret settings +
     // decrypted secrets) to seed the worker's local `settings.get` mirror,
     // which plugin code may consult synchronously during `activate()`.
-    await primePluginSettingsCache(db, plugin)
+    await primePluginSettingsCache(plugin)
 
     // Phase: module-pack-load — registers canvas modules in the host registry
     // so server-rendered (publisher) and editor-rendered (canvas) pages can
@@ -445,7 +427,7 @@ export async function activateInstalledServerPlugins(
         const message = err instanceof Error ? err.message : 'Module pack load failed'
         console.error(`[plugin:${manifest.id}] boot module-pack-load failed: ${message}`)
         try {
-          await setPluginLifecycleStatus(db, manifest.id, 'error', message)
+          await setPluginLifecycleStatus(manifest.id, 'error', message)
         } catch (dbErr) {
           console.error(`[plugin:${manifest.id}] failed to persist boot module-pack error:`, dbErr)
         }
@@ -456,12 +438,12 @@ export async function activateInstalledServerPlugins(
     if (manifest.entrypoints?.server) {
       try {
         const loaded = await loadPluginServerEntrypoint(manifest, uploadsDir)
-        if (loaded) await runPluginLifecycle(db, manifest.id, 'activate')
+        if (loaded) await runPluginLifecycle(manifest.id, 'activate')
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Server entrypoint activation failed'
         console.error(`[plugin:${manifest.id}] boot server-entrypoint failed: ${message}`)
         try {
-          await setPluginLifecycleStatus(db, manifest.id, 'error', message)
+          await setPluginLifecycleStatus(manifest.id, 'error', message)
         } catch (dbErr) {
           console.error(`[plugin:${manifest.id}] failed to persist boot entrypoint error:`, dbErr)
         }

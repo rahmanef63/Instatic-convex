@@ -20,7 +20,6 @@
  * squat arbitrary per-user keys through this surface. The whitelist also
  * gives us per-key schema validation at both read and write boundaries.
  */
-import type { DbClient } from '../../db/client'
 import { requireAuthenticatedUser } from '../../auth/authz'
 import { badRequest, jsonResponse, methodNotAllowed, readValidatedBody } from '../../http'
 import { CMS_API_PREFIX } from './shared'
@@ -51,7 +50,6 @@ const PutBodyEnvelopeSchema = Type.Object({ value: Type.Unknown() })
 
 export async function handleUserPreferencesRoutes(
   req: Request,
-  db: DbClient,
 ): Promise<Response | null> {
   const url = new URL(req.url)
   if (!url.pathname.startsWith(PREFIX)) return null
@@ -67,11 +65,11 @@ export async function handleUserPreferencesRoutes(
   }
   const key: UserPreferenceKey = rawKey
 
-  const user = await requireAuthenticatedUser(req, db)
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
 
   if (req.method === 'GET') {
-    const stored = await getUserPreferenceRow(db, user.id, key)
+    const stored = await getUserPreferenceRow(user.id, key)
     if (stored === null) {
       // Not set yet → `{ value: null }`, NOT a 404. These prefs are all
       // optional (the client falls back to a default), so a 404 here is
@@ -103,12 +101,12 @@ export async function handleUserPreferencesRoutes(
     const value = parseValueOrBadRequest(USER_PREFERENCE_SCHEMAS[key], envelope.value)
     if (value instanceof Response) return value
 
-    await upsertUserPreferenceRow(db, user.id, key, value)
+    await upsertUserPreferenceRow(user.id, key, value)
     return jsonResponse({ value })
   }
 
   if (req.method === 'DELETE') {
-    await deleteUserPreferenceRow(db, user.id, key)
+    await deleteUserPreferenceRow(user.id, key)
     return new Response(null, { status: 204 })
   }
 

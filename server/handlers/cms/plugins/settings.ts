@@ -13,7 +13,6 @@
  *       decrypted runtime record into the running VM, and fires
  *       `settings.changed` so plugin server hooks see real values.
  */
-import type { DbClient } from '../../../db/client'
 import type { AuthUser } from '../../../repositories/users'
 import { createAuditEvent } from '../../../repositories/audit'
 import { getInstalledPlugin } from '../../../repositories/plugins'
@@ -31,11 +30,10 @@ import { pluginNotFound, projectSecretSettings } from './shared'
 
 export async function handlePluginSettings(
   req: Request,
-  db: DbClient,
   user: AuthUser,
   pluginId: string,
 ): Promise<Response> {
-  const result = await getInstalledPlugin(db, pluginId)
+  const result = await getInstalledPlugin(pluginId)
   if (!result) return pluginNotFound()
   if (result.kind === 'broken') {
     return jsonResponse(
@@ -50,7 +48,7 @@ export async function handlePluginSettings(
   }
 
   if (req.method === 'GET') {
-    const states = await listPluginSecretStates(db, pluginId)
+    const states = await listPluginSecretStates(pluginId)
     return jsonResponse({
       schema: declared,
       settings: projectSecretSettings(declared, plugin.settings, states),
@@ -78,14 +76,14 @@ export async function handlePluginSettings(
     // observe the new values.
     let runtimeSettings: PluginSettingsValues
     try {
-      runtimeSettings = await persistAndSyncPluginSettings(db, pluginId, declared, cleaned)
+      runtimeSettings = await persistAndSyncPluginSettings(pluginId, declared, cleaned)
     } catch (err) {
       if (err instanceof PluginSecretError) {
         return jsonResponse({ error: err.message }, { status: err.status })
       }
       throw err
     }
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'plugin.settings.update',
       targetType: 'plugin',
@@ -96,7 +94,7 @@ export async function handlePluginSettings(
       },
       ...requestAuditContext(req),
     })
-    const states = await listPluginSecretStates(db, pluginId)
+    const states = await listPluginSecretStates(pluginId)
     // Projection overrides every secret field with `'***'`/`''`, so the
     // runtime record's decrypted values never reach the response.
     return jsonResponse({

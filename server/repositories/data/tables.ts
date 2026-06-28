@@ -14,11 +14,7 @@
  *   insertDataTableIfAbsent  — insert only if id absent; used by merge-add / merge-overwrite
  *
  * Convex port: this file is now a thin adapter over `convex/dataTables.ts`
- * (docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged while the rest of the runtime is
- * still on the SQL path; it is dropped wholesale when `server/db/*` is retired
- * (§7).
+ * (docs/CONVEX-MIGRATION.md §2).
  *
  * What stays here, on the Bun side: `mapTable` — the single mapper from the
  * Convex wire row to the camelCase `DataTable`. It applies the `@core`
@@ -38,7 +34,6 @@ import type {
   DataTableListItem,
 } from '@core/data/schemas'
 import { isoDate } from '@core/utils/isoDate'
-import type { DbClient } from '../../db/client'
 import { api, getConvex } from '../../convex/client'
 
 interface CreateDataTableInput {
@@ -119,7 +114,7 @@ function mapTable(row: DataTableWireRow): DataTable {
   }
 }
 
-export async function listDataTables(_db: DbClient): Promise<DataTable[]> {
+export async function listDataTables(): Promise<DataTable[]> {
   const rows = await getConvex().query(api.dataTables.list, {})
   return rows.map(mapTable)
 }
@@ -129,12 +124,12 @@ export async function listDataTables(_db: DbClient): Promise<DataTable[]> {
  * row count, computed inside the Convex query (one `by_table_updated` scan per
  * table — fine given the tiny number of tables).
  */
-export async function listDataTablesWithCounts(_db: DbClient): Promise<DataTableListItem[]> {
+export async function listDataTablesWithCounts(): Promise<DataTableListItem[]> {
   const rows = await getConvex().query(api.dataTables.listWithCounts, {})
   return rows.map((row) => ({ ...mapTable(row), rowCount: row.row_count }))
 }
 
-export async function getDataTable(_db: DbClient, tableId: string): Promise<DataTable | null> {
+export async function getDataTable(tableId: string): Promise<DataTable | null> {
   const row = await getConvex().query(api.dataTables.get, { tableId })
   return row ? mapTable(row) : null
 }
@@ -144,13 +139,12 @@ export async function getDataTable(_db: DbClient, tableId: string): Promise<Data
  * per-call code paths (every `cms.content.*` plugin api-call resolves its table
  * this way) never scan and re-parse the whole table list.
  */
-export async function getDataTableBySlug(_db: DbClient, slug: string): Promise<DataTable | null> {
+export async function getDataTableBySlug(slug: string): Promise<DataTable | null> {
   const row = await getConvex().query(api.dataTables.getBySlug, { slug })
   return row ? mapTable(row) : null
 }
 
 export async function createDataTable(
-  _db: DbClient,
   input: CreateDataTableInput,
 ): Promise<DataTable> {
   // NOTE: table creation is pure data access. Entry templates are ordinary
@@ -172,7 +166,6 @@ export async function createDataTable(
 }
 
 export async function updateDataTable(
-  _db: DbClient,
   tableId: string,
   input: UpdateDataTableInput,
 ): Promise<DataTable | null> {
@@ -201,7 +194,6 @@ export async function updateDataTable(
  * the `merge-add` and `merge-overwrite` import strategies.
  */
 export async function insertDataTableIfAbsent(
-  _db: DbClient,
   input: CreateDataTableInput,
 ): Promise<boolean> {
   return getConvex().mutation(api.dataTables.insertIfAbsent, {
@@ -229,7 +221,6 @@ export async function insertDataTableIfAbsent(
  * `not null default false`).
  */
 export async function softDeleteDataTable(
-  _db: DbClient,
   tableId: string,
   actorUserId: string | null = null,
 ): Promise<DataTable | null> {

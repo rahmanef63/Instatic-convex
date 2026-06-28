@@ -3,9 +3,7 @@
  * `plugin_crash_events`.
  *
  * Convex port: the read/write bodies are thin adapters over `convex/plugins.ts`
- * (docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged until `server/db/*` is retired (§7).
+ * (docs/CONVEX-MIGRATION.md §2).
  *
  * What stays here, on the Bun side:
  * - **The manifest/settings mappers** (`mapInstalledPlugin`,
@@ -39,7 +37,6 @@ import {
 } from './pluginSecrets'
 import type { StorageListOptions } from '@core/plugin-sdk/storageSchemas'
 import { parsePluginManifest } from '@core/plugins/manifest'
-import type { DbClient } from '../db/client'
 import { isoDate } from '@core/utils/isoDate'
 import { api, getConvex } from '../convex/client'
 
@@ -193,18 +190,17 @@ function mapPluginRecord(row: PluginRecordRow): PluginRecord {
   }
 }
 
-export async function listInstalledPlugins(_db: DbClient): Promise<InstalledPluginResult[]> {
+export async function listInstalledPlugins(): Promise<InstalledPluginResult[]> {
   const rows = await getConvex().query(api.plugins.listInstalled, {})
   return rows.map(mapInstalledPlugin)
 }
 
-export async function getInstalledPlugin(_db: DbClient, id: string): Promise<InstalledPluginResult | null> {
+export async function getInstalledPlugin(id: string): Promise<InstalledPluginResult | null> {
   const row = await getConvex().query(api.plugins.getInstalled, { id })
   return row ? mapInstalledPlugin(row) : null
 }
 
 export async function installPlugin(
-  _db: DbClient,
   manifest: PluginManifest,
   grantedPermissions: PluginPermission[] = manifest.grantedPermissions ?? [],
 ): Promise<InstalledPlugin> {
@@ -218,10 +214,9 @@ export async function installPlugin(
   const initialSettings = Object.fromEntries(
     Object.entries(pluginSettingsDefaults(declared)).filter(([key]) => !secretIds.has(key)),
   )
-  // The installed_plugins upsert (on conflict do update — settings_json is
-  // preserved on the update path) lives in the Convex mutation; the encrypted
-  // secret seed runs Bun-side around it (crypto can't cross into Convex), as
-  // the SQL path also ran the seed as a separate statement.
+  // The installed_plugins upsert (settings_json is preserved on the update
+  // path) lives in the Convex mutation; the encrypted secret seed runs Bun-side
+  // around it (crypto can't cross into Convex).
   const row = await getConvex().mutation(api.plugins.install, {
     id: manifest.id,
     name: manifest.name,
@@ -233,7 +228,7 @@ export async function installPlugin(
   // Secret settings with a non-empty manifest default get an encrypted row.
   // Insert-if-absent: the upgrade/rollback flows reuse this upsert and must
   // never clobber a secret the site owner has since rotated.
-  await seedPluginSecretDefaults(_db, manifest.id, declared)
+  await seedPluginSecretDefaults(manifest.id, declared)
   const result = mapInstalledPlugin(row)
   // installPlugin is always called with a freshly-validated manifest — a
   // broken result here indicates a serialisation invariant violation.
@@ -244,7 +239,6 @@ export async function installPlugin(
 }
 
 export async function setPluginEnabled(
-  _db: DbClient,
   id: string,
   enabled: boolean,
 ): Promise<InstalledPluginResult | null> {
@@ -253,7 +247,6 @@ export async function setPluginEnabled(
 }
 
 export async function setPluginLifecycleStatus(
-  _db: DbClient,
   id: string,
   lifecycleStatus: PluginLifecycleStatus,
   lastError: string | null = null,
@@ -266,7 +259,7 @@ export async function setPluginLifecycleStatus(
   return row ? mapInstalledPlugin(row) : null
 }
 
-export async function deletePlugin(_db: DbClient, id: string): Promise<boolean> {
+export async function deletePlugin(id: string): Promise<boolean> {
   return getConvex().mutation(api.plugins.deletePlugin, { id })
 }
 
@@ -280,12 +273,11 @@ export async function deletePlugin(_db: DbClient, id: string): Promise<boolean> 
  * Throws `PluginSecretError` when secret encryption is misconfigured.
  */
 export async function setPluginSettings(
-  _db: DbClient,
   id: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
   settings: PluginSettingsValues,
 ): Promise<InstalledPluginResult | null> {
-  const plainSettings = await applyPluginSecretSettings(_db, id, declared, settings)
+  const plainSettings = await applyPluginSecretSettings(id, declared, settings)
   const row = await getConvex().mutation(api.plugins.setSettings, {
     id,
     settingsJson: writeJson(plainSettings),
@@ -302,7 +294,6 @@ export async function setPluginSettings(
 const FIELD_KEY_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
 export async function listPluginRecords(
-  _db: DbClient,
   pluginId: string,
   resourceId: string,
   options: StorageListOptions = {},
@@ -342,7 +333,6 @@ export async function listPluginRecords(
 }
 
 export async function createPluginRecord(
-  _db: DbClient,
   input: {
     id: string
     pluginId: string
@@ -360,7 +350,6 @@ export async function createPluginRecord(
 }
 
 export async function updatePluginRecord(
-  _db: DbClient,
   input: {
     id: string
     pluginId: string
@@ -378,7 +367,6 @@ export async function updatePluginRecord(
 }
 
 export async function deletePluginRecord(
-  _db: DbClient,
   input: { id: string; pluginId: string; resourceId: string },
 ): Promise<boolean> {
   return getConvex().mutation(api.plugins.deleteRecord, {
@@ -425,7 +413,6 @@ function mapPluginCrashEvent(row: PluginCrashEventRow): PluginCrashEvent {
 
 /** Insert a new crash event row + prune older rows past the cap (one atomic mutation). */
 export async function recordPluginCrash(
-  _db: DbClient,
   input: { id: string; pluginId: string; reason: string; stack?: string | null },
 ): Promise<PluginCrashEvent> {
   const row = await getConvex().mutation(api.plugins.recordCrash, {
@@ -440,7 +427,6 @@ export async function recordPluginCrash(
 
 /** List the most-recent crash events for one plugin, newest first. */
 export async function listPluginCrashes(
-  _db: DbClient,
   pluginId: string,
   limit = MAX_CRASH_EVENTS_PER_PLUGIN,
 ): Promise<PluginCrashEvent[]> {
@@ -449,6 +435,6 @@ export async function listPluginCrashes(
 }
 
 /** Drop every crash event for a plugin. Called on every uninstall path + on manual restart. */
-export async function clearPluginCrashes(_db: DbClient, pluginId: string): Promise<void> {
+export async function clearPluginCrashes(pluginId: string): Promise<void> {
   await getConvex().mutation(api.plugins.clearCrashes, { pluginId })
 }

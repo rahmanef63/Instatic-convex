@@ -20,7 +20,6 @@
  * `PUT /admin/api/cms/site`. All endpoints are gated by `site.style.edit`
  * — fonts are typography / visual setup, not content edits.
  */
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import {
   assembleCustomFontEntry,
@@ -73,14 +72,14 @@ async function readGoogleFontSelectionBody(
 // Per-route handlers
 // ---------------------------------------------------------------------------
 
-async function handleGoogleFontsDirectory(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.style.edit')
+async function handleGoogleFontsDirectory(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'site.style.edit')
   if (user instanceof Response) return user
   return jsonResponse({ families: listGoogleFonts() })
 }
 
-async function handleEstimateFont(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.style.edit')
+async function handleEstimateFont(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'site.style.edit')
   if (user instanceof Response) return user
 
   const selection = await readGoogleFontSelectionBody(req)
@@ -96,8 +95,8 @@ async function handleEstimateFont(req: Request, db: DbClient): Promise<Response>
   }
 }
 
-async function handleCustomFont(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.style.edit')
+async function handleCustomFont(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'site.style.edit')
   if (user instanceof Response) return user
 
   const CustomFontBodySchema = Type.Object({
@@ -126,7 +125,7 @@ async function handleCustomFont(req: Request, db: DbClient): Promise<Response> {
       return badRequest(`Invalid font variant: "${variant}"`)
     }
 
-    const asset = await getMediaAsset(db, mediaAssetId)
+    const asset = await getMediaAsset(mediaAssetId)
     if (!asset) return badRequest(`Media asset not found: ${mediaAssetId}`)
     const format = fontFormatForMime(asset.mimeType)
     if (!format) {
@@ -147,11 +146,10 @@ async function handleCustomFont(req: Request, db: DbClient): Promise<Response> {
 
 async function handleInstallFont(
   req: Request,
-  db: DbClient,
   _params: RouteParams,
   options: CmsHandlerOptions,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.style.edit')
+  const user = await requireCapability(req, 'site.style.edit')
   if (user instanceof Response) return user
   if (!options.uploadsDir) {
     return jsonResponse({ error: 'Uploads directory is not configured' }, { status: 500 })
@@ -172,11 +170,10 @@ async function handleInstallFont(
 
 async function handleDeleteFontFamily(
   req: Request,
-  db: DbClient,
   params: RouteParams,
   options: CmsHandlerOptions,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.style.edit')
+  const user = await requireCapability(req, 'site.style.edit')
   if (user instanceof Response) return user
   if (!options.uploadsDir) {
     return jsonResponse({ error: 'Uploads directory is not configured' }, { status: 500 })
@@ -209,8 +206,7 @@ const FONTS_ROUTES: readonly Route<[CmsHandlerOptions]>[] = [
 
 export async function handleFontsRoutes(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
 ): Promise<Response | null> {
-  return runRouteTable(req, db, FONTS_ROUTES, options)
+  return runRouteTable(req, FONTS_ROUTES, options)
 }

@@ -2,11 +2,8 @@
  * Media folder repository.
  *
  * Convex port: the read/write bodies are now thin adapters over
- * `convex/mediaFolders.ts` (docs/CONVEX-MIGRATION.md §2). The exported
- * signatures are frozen — the leading SQL `DbClient` handle is retained (named
- * `_db`, intentionally unused) so handlers keep calling these unchanged while
- * the rest of the runtime is still on the SQL path; it is dropped wholesale when
- * `server/db/*` is retired (§7). The pure `mapFolder` hydrator stays here.
+ * `convex/mediaFolders.ts` (docs/CONVEX-MIGRATION.md §2). The pure `mapFolder`
+ * hydrator stays here.
  *
  * Backs the HappyFiles-style folder tree on the Media page. Folders form a
  * tree via `parent_id` (null = root). Slugs are unique within a parent so
@@ -18,7 +15,6 @@
  *
  * @see convex/mediaFolders.ts — the Convex query/mutation functions
  */
-import type { DbClient } from '../db/client'
 import { isoDate } from '@core/utils/isoDate'
 import { api, getConvex } from '../convex/client'
 
@@ -70,13 +66,12 @@ function mapFolder(row: MediaFolderRow): MediaFolder {
   }
 }
 
-export async function listMediaFolders(_db: DbClient): Promise<MediaFolder[]> {
+export async function listMediaFolders(): Promise<MediaFolder[]> {
   const rows = await getConvex().query(api.mediaFolders.list, {})
   return rows.map(mapFolder)
 }
 
 export async function getMediaFolder(
-  _db: DbClient,
   id: string,
 ): Promise<MediaFolder | null> {
   const row = await getConvex().query(api.mediaFolders.get, { id })
@@ -84,7 +79,6 @@ export async function getMediaFolder(
 }
 
 export async function createMediaFolder(
-  _db: DbClient,
   input: CreateMediaFolderInput,
 ): Promise<MediaFolder> {
   const row = await getConvex().mutation(api.mediaFolders.create, {
@@ -99,7 +93,6 @@ export async function createMediaFolder(
 }
 
 export async function updateMediaFolder(
-  _db: DbClient,
   id: string,
   input: UpdateMediaFolderInput,
 ): Promise<MediaFolder | null> {
@@ -123,7 +116,6 @@ export async function updateMediaFolder(
  * become Uncategorized).
  */
 export async function deleteMediaFolder(
-  _db: DbClient,
   id: string,
 ): Promise<boolean> {
   return getConvex().mutation(api.mediaFolders.del, { id })
@@ -143,8 +135,8 @@ export interface ExportableMediaFolder {
 }
 
 /** The whole folder tree, raw, for a full-site export. */
-export async function listExportableMediaFolders(db: DbClient): Promise<ExportableMediaFolder[]> {
-  const folders = await listMediaFolders(db)
+export async function listExportableMediaFolders(): Promise<ExportableMediaFolder[]> {
+  const folders = await listMediaFolders()
   return folders.map((f) => ({
     id: f.id,
     parentId: f.parentId,
@@ -155,7 +147,7 @@ export async function listExportableMediaFolders(db: DbClient): Promise<Exportab
 }
 
 /** Wipe all folders (cascades membership) — used by the `replace` import strategy. */
-export async function deleteAllMediaFolders(_db: DbClient): Promise<void> {
+export async function deleteAllMediaFolders(): Promise<void> {
   await getConvex().mutation(api.mediaFolders.deleteAll, {})
 }
 
@@ -166,7 +158,6 @@ export async function deleteAllMediaFolders(_db: DbClient): Promise<void> {
  * bundle import handler.
  */
 export async function importMediaFolder(
-  _db: DbClient,
   input: ExportableMediaFolder,
 ): Promise<void> {
   await getConvex().mutation(api.mediaFolders.importFolder, {
@@ -184,7 +175,6 @@ export async function importMediaFolder(
  * constraint violation.
  */
 export async function isMediaFolderSlugTaken(
-  _db: DbClient,
   parentId: string | null,
   slug: string,
   excludeId?: string,

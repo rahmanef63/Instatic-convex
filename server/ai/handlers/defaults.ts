@@ -10,7 +10,6 @@
 import { Type } from '@core/utils/typeboxHelpers'
 import { jsonResponse, readValidatedBody, badRequest } from '../../http'
 import { requireCapability } from '../../auth/authz'
-import type { DbClient } from '../../db/client'
 import { createAuditEvent } from '../../repositories/audit'
 import { clearDefaultForScope, listDefaults, setDefaultForScope } from '../defaults/store'
 import type { ToolScope } from '../runtime/types'
@@ -24,27 +23,26 @@ const PutBodySchema = Type.Object({
 
 export function tryHandleAiDefaults(
   req: Request,
-  db: DbClient,
   pathname: string,
 ): Promise<Response> | null {
   if (pathname === '/admin/api/ai/defaults') {
-    return handleList(req, db)
+    return handleList(req)
   }
   const match = pathname.match(/^\/admin\/api\/ai\/defaults\/([^/]+)$/)
   if (match) {
-    return handleScope(req, db, match[1]!)
+    return handleScope(req, match[1]!)
   }
   return null
 }
 
-async function handleList(req: Request, db: DbClient): Promise<Response> {
+async function handleList(req: Request): Promise<Response> {
   if (req.method !== 'GET') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
-  const records = await listDefaults(db)
+  const records = await listDefaults()
   // Project into a scope-keyed map; UI groups by scope.
   const defaults: Record<string, { credentialId: string; modelId: string }> = {}
   for (const rec of records) {
@@ -53,12 +51,12 @@ async function handleList(req: Request, db: DbClient): Promise<Response> {
   return jsonResponse({ defaults })
 }
 
-async function handleScope(req: Request, db: DbClient, scope: string): Promise<Response> {
+async function handleScope(req: Request, scope: string): Promise<Response> {
   if (req.method === 'PUT') {
-    return handleSet(req, db, scope)
+    return handleSet(req, scope)
   }
   if (req.method === 'DELETE') {
-    return handleClear(req, db, scope)
+    return handleClear(req, scope)
   }
   return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 }
@@ -71,13 +69,13 @@ function validateScope(scope: string): Response | null {
   )
 }
 
-async function handleSet(req: Request, db: DbClient, scope: string): Promise<Response> {
+async function handleSet(req: Request, scope: string): Promise<Response> {
   if (req.method !== 'PUT') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
   const scopeError = validateScope(scope)
   if (scopeError) return scopeError
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const body = await readValidatedBody(req, PutBodySchema)
@@ -86,13 +84,12 @@ async function handleSet(req: Request, db: DbClient, scope: string): Promise<Res
 
   try {
     const record = await setDefaultForScope(
-      db,
       scope as ToolScope,
       credentialId,
       modelId,
       userOrResponse.id,
     )
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: userOrResponse.id,
       action: 'ai.default.updated',
       targetType: 'ai_default',
@@ -119,14 +116,14 @@ async function handleSet(req: Request, db: DbClient, scope: string): Promise<Res
   }
 }
 
-async function handleClear(req: Request, db: DbClient, scope: string): Promise<Response> {
+async function handleClear(req: Request, scope: string): Promise<Response> {
   const scopeError = validateScope(scope)
   if (scopeError) return scopeError
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
 
-  await clearDefaultForScope(db, scope as ToolScope)
-  await createAuditEvent(db, {
+  await clearDefaultForScope(scope as ToolScope)
+  await createAuditEvent({
     actorUserId: userOrResponse.id,
     action: 'ai.default.cleared',
     targetType: 'ai_default',

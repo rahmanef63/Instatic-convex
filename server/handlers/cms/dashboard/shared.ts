@@ -1,5 +1,5 @@
 /**
- * Shared SQL + coercion helpers used by multiple dashboard widget readers.
+ * Shared helpers used by multiple dashboard widget readers.
  *
  * Anything in this module is consumed by 2+ readers. One-reader helpers
  * stay co-located in their reader's file so the call site is obvious and
@@ -7,57 +7,27 @@
  *
  *   • `readStatusCounts`        — Pages, Posts
  *   • `readPublishedSinceCount` — Pages (Posts uses the histogram instead)
- *   • `coerceCount`             — every reader that calls `count(*)`
- *   • `coerceBytes`             — Media, Storage
  *   • `buildRowPath`            — Publish lineup, Activity
  */
-import type { DbClient } from '../../../db/client'
-
-/**
- * Coerce a SQL `count(*)` result into a plain JS number. Postgres returns
- * BIGINT counts as strings; SQLite returns them as numbers; both can be
- * `null` when the query had no rows. This helper collapses all three
- * shapes to `number` with a 0 default so callers don't need to repeat the
- * triple-typeof dance.
- */
-export function coerceCount(raw: number | string | null | undefined): number {
-  if (raw === null || raw === undefined) return 0
-  if (typeof raw === 'string') return parseInt(raw, 10) || 0
-  return raw
-}
-
-/**
- * Coerce a SQL `sum(...)` byte total into a plain JS number. Same shape
- * as {@link coerceCount} — Postgres BIGINT sums come back as strings,
- * SQLite returns numbers, both can be `null` for an empty set. Aliased
- * separately so call sites read as "this is a byte count" at a glance.
- */
-export const coerceBytes = coerceCount
+import { listDataRows } from '../../../repositories/data'
 
 /**
  * Group counts of `data_rows.status` for a single table. Returns
- * {draft, published, scheduled, total} so the handler can derive
- * everything from one round-trip per table.
+ * {draft, published, scheduled, total}. `total` is the sum of those three
+ * editorial statuses only — `unpublished` rows are intentionally excluded,
+ * matching the widget's "live editorial backlog" framing.
  */
 export async function readStatusCounts(
-  db: DbClient,
   tableId: string,
 ): Promise<{ total: number; published: number; drafts: number; scheduled: number }> {
-  const { rows } = await db<{ status: string; count: number | string }>`
-    select status, count(*) as count
-    from data_rows
-    where table_id = ${tableId}
-      and deleted_at is null
-    group by status
-  `
+  const rows = await listDataRows(tableId)
   let published = 0
   let drafts = 0
   let scheduled = 0
   for (const r of rows) {
-    const n = coerceCount(r.count)
-    if (r.status === 'published') published += n
-    else if (r.status === 'draft') drafts += n
-    else if (r.status === 'scheduled') scheduled += n
+    if (r.status === 'published') published += 1
+    else if (r.status === 'draft') drafts += 1
+    else if (r.status === 'scheduled') scheduled += 1
   }
   return {
     total: published + drafts + scheduled,
@@ -68,24 +38,17 @@ export async function readStatusCounts(
 }
 
 /**
- * Count `data_rows` whose `published_at` lies in the trailing window,
+ * Count `data_rows` whose `publishedAt` lies in the trailing window,
  * for one table. Used by the Pages widget's "+N this week" delta.
  */
 export async function readPublishedSinceCount(
-  db: DbClient,
   tableId: string,
   sinceIso: string,
 ): Promise<number> {
-  const { rows } = await db<{ count: number | string }>`
-    select count(*) as count
-    from data_rows
-    where table_id = ${tableId}
-      and deleted_at is null
-      and status = 'published'
-      and published_at is not null
-      and published_at >= ${sinceIso}
-  `
-  return coerceCount(rows[0]?.count)
+  const rows = await listDataRows(tableId)
+  return rows.filter(
+    (r) => r.status === 'published' && r.publishedAt !== null && r.publishedAt >= sinceIso,
+  ).length
 }
 
 /**

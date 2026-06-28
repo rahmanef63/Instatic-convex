@@ -30,7 +30,6 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { assertPathWithin } from '../../util/pathWithin'
-import type { DbClient } from '../../db/client'
 import { requireCapability, requireStepUp, userHasCapability } from '../../auth/authz'
 import { importMediaAsset, assignAssetToFolders } from '../../repositories/media'
 import { api, getConvex } from '../../convex/client'
@@ -129,7 +128,6 @@ function orderFoldersParentFirst<T extends { id: string; parentId: string | null
 
 export async function handleImportRoute(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions = {},
 ): Promise<Response | null> {
   const url = new URL(req.url)
@@ -137,7 +135,7 @@ export async function handleImportRoute(
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 
   // Base gate — any import requires `data.import`.
-  const user = await requireCapability(req, db, 'data.import')
+  const user = await requireCapability(req, 'data.import')
   if (user instanceof Response) return user
 
   // Parse strategy from query string (default: replace)
@@ -160,7 +158,7 @@ export async function handleImportRoute(
     if (!userHasCapability(user, 'content.manage')) {
       return jsonResponse({ error: 'Forbidden' }, { status: 403 })
     }
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
   }
 
@@ -198,7 +196,7 @@ export async function handleImportRoute(
   // ---------------------------------------------------------------------------
   // DB writes — each strategy is ONE atomic Convex mutation
   // (docs/CONVEX-MIGRATION.md §3 #4–#6). All bundle parsing + normalisation is
-  // done Bun-side above; the prepared records cross the wire and every ctx.db
+  // done Bun-side above; the prepared records cross the wire and every write
   // operation runs inside a single mutation so a crash rolls the whole import
   // back. Counters come back from the mutation.
   // ---------------------------------------------------------------------------
@@ -264,7 +262,7 @@ export async function handleImportRoute(
         await writeFile(target, bytes)
 
         // Upsert the media_assets row
-        await importMediaAsset(db, {
+        await importMediaAsset({
           id: asset.id,
           filename: asset.filename,
           mimeType: asset.mimeType,
@@ -287,7 +285,7 @@ export async function handleImportRoute(
         // imported, so a stale folderId can't violate the membership FK.
         const targetFolders = asset.folderIds.filter((id) => importedFolderIds.has(id))
         if (targetFolders.length > 0) {
-          await assignAssetToFolders(db, asset.id, { add: targetFolders })
+          await assignAssetToFolders(asset.id, { add: targetFolders })
         }
 
         mediaImported++

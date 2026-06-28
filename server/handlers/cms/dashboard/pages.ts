@@ -3,17 +3,16 @@
  * system table plus a "+N this week" delta of pages published in the
  * trailing 7 days.
  */
-import type { DbClient } from '../../../db/client'
 import { readPublishedSinceCount, readStatusCounts } from './shared'
 import type { PagesStats } from './types'
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 
-export async function readPagesStats(db: DbClient): Promise<PagesStats> {
+export async function readPagesStats(): Promise<PagesStats> {
   const sevenDaysAgoIso = new Date(Date.now() - SEVEN_DAYS_MS).toISOString()
   const [counts, delta] = await Promise.all([
-    readStatusCounts(db, 'pages'),
-    readPublishedSinceCount(db, 'pages', sevenDaysAgoIso),
+    readStatusCounts('pages'),
+    readPublishedSinceCount('pages', sevenDaysAgoIso),
   ])
   return {
     total: counts.total,

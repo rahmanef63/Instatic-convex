@@ -15,7 +15,6 @@
  * A failed refresh is logged and keeps the previous data — never fatal.
  */
 
-import type { DbClient } from '../../db/client'
 import type { AiProviderId } from '../runtime/types'
 import {
   fetchOpenRouterCatalogue,
@@ -50,14 +49,13 @@ let inflight: Promise<ModelCatalogue | null> | null = null
  * the provider is free (Ollama).
  */
 export async function resolveCostUsd(
-  db: DbClient,
   providerId: AiProviderId,
   modelId: string,
   usage: UsageTokens,
 ): Promise<number> {
   if (providerId === 'ollama') return 0
 
-  const catalogue = await ensureCatalogue(db)
+  const catalogue = await ensureCatalogue()
   const entry = catalogue.get(pricingKey(modelId))
   if (!entry) {
     console.warn(`[ai/pricing] no live price for ${providerId}/${modelId} — recording cost 0`)
@@ -73,8 +71,8 @@ export async function resolveCostUsd(
  * source of context windows, including for the composer meter. Never throws —
  * returns an empty map if nothing is cached and the live fetch fails.
  */
-export async function getModelCatalogue(db: DbClient): Promise<ModelCatalogue> {
-  return ensureCatalogue(db)
+export async function getModelCatalogue(): Promise<ModelCatalogue> {
+  return ensureCatalogue()
 }
 
 /**
@@ -111,14 +109,14 @@ export function computeCostUsd(
   return Math.round(cost * 1_000_000) / 1_000_000
 }
 
-async function ensureCatalogue(db: DbClient): Promise<ModelCatalogue> {
+async function ensureCatalogue(): Promise<ModelCatalogue> {
   if (!memo) {
     // A read failure here (e.g. schema drift before migrations catch up) must
     // never crash a caller — the catalogue is best-effort enrichment. Fall
     // through to a live fetch, which doesn't touch the DB.
     let cached: ModelCatalogue | null = null
     try {
-      cached = await loadCachedCatalogue(db)
+      cached = await loadCachedCatalogue()
     } catch (err) {
       console.error('[ai/pricing] reading cached catalogue failed:', err)
     }
@@ -132,22 +130,22 @@ async function ensureCatalogue(db: DbClient): Promise<ModelCatalogue> {
 
   if (memo) {
     // Stale but present — refresh in the background, serve stale now.
-    void refresh(db)
+    void refresh()
     return memo.catalogue
   }
 
   // Nothing cached anywhere — block on the first live fetch.
-  const fetched = await refresh(db)
+  const fetched = await refresh()
   return fetched ?? new Map()
 }
 
-function refresh(db: DbClient): Promise<ModelCatalogue | null> {
+function refresh(): Promise<ModelCatalogue | null> {
   if (inflight) return inflight
   inflight = (async () => {
     try {
       const catalogue = await fetchOpenRouterCatalogue()
       memo = { catalogue, refreshedAt: Date.now() }
-      await saveCachedCatalogue(db, catalogue)
+      await saveCachedCatalogue(catalogue)
       return catalogue
     } catch (err) {
       console.error('[ai/pricing] catalogue refresh failed:', err)

@@ -18,7 +18,6 @@
  * `handleDataTableRoutes` is the dispatcher; one function below per URL
  * pattern owns its own method-routing, body-parsing, and audit emission.
  */
-import type { DbClient } from '../../../db/client'
 import type { AuthUser } from '../../../repositories/users'
 import type { DataTable } from '@core/data/schemas'
 import { createAuditEvent } from '../../../repositories/audit'
@@ -69,8 +68,8 @@ import { requireStepUp } from '../../../auth/authz'
 function buildTablePatch(
   body: TablePatchBody,
   actorUserId: string,
-): Parameters<typeof updateDataTable>[2] | { error: string } {
-  const update: Parameters<typeof updateDataTable>[2] = {}
+): Parameters<typeof updateDataTable>[1] | { error: string } {
+  const update: Parameters<typeof updateDataTable>[1] = {}
 
   if (body.name !== undefined) {
     if (!body.name.trim()) return { error: 'Table name is required' }
@@ -111,13 +110,12 @@ type TableAuditAction =
   | 'data.table.delete'
 
 async function recordTableAuditEvent(
-  db: DbClient,
   user: AuthUser,
   req: Request,
   action: TableAuditAction,
   table: DataTable,
 ): Promise<void> {
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action,
     targetType: 'data_table',
@@ -145,24 +143,24 @@ async function recordTableAuditEvent(
  * Mutations stay strict (`data.custom.tables.manage` — creation is always a
  * custom table).
  */
-async function requireAnyRead(req: Request, db: DbClient): Promise<AuthUser | Response> {
-  const tablesRead = await requireDataTablesRead(req, db)
+async function requireAnyRead(req: Request): Promise<AuthUser | Response> {
+  const tablesRead = await requireDataTablesRead(req)
   if (!(tablesRead instanceof Response)) return tablesRead
-  return requireDataAccess(req, db)
+  return requireDataAccess(req)
 }
 
-async function handleTablesCollection(req: Request, db: DbClient): Promise<Response> {
+async function handleTablesCollection(req: Request): Promise<Response> {
   // GET = schema-level read (Data workspace floor; `content.*` callers also
   // accepted because the loop picker calls this and needs to know what tables
   // exist). POST = create a CUSTOM table (`data.custom.tables.manage` + step-up
   // — creating a table changes the public route surface of the site).
   const user = req.method === 'GET'
-    ? await requireAnyRead(req, db)
-    : await requireCustomTablesManager(req, db)
+    ? await requireAnyRead(req)
+    : await requireCustomTablesManager(req)
   if (user instanceof Response) return user
 
   if (req.method === 'POST') {
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
   }
 
@@ -172,7 +170,7 @@ async function handleTablesCollection(req: Request, db: DbClient): Promise<Respo
     const limitParam = url.searchParams.get('limit')
     const limit = limitParam ? Math.min(Math.max(parseInt(limitParam, 10) || 25, 1), 100) : null
 
-    let tables = await listDataTablesWithCounts(db)
+    let tables = await listDataTablesWithCounts()
 
     // Per-family visibility: a custom-only persona (e.g. "client") never sees
     // the system tables. Content-row callers (loop/template pickers) keep the
@@ -208,7 +206,7 @@ async function handleTablesCollection(req: Request, db: DbClient): Promise<Respo
     const slug = slugFromTitle(body.slug?.trim() || pluralLabel)
     const routeBase = normalizeRouteBase(body.routeBase?.trim() || slug)
 
-    const table = await createDataTable(db, {
+    const table = await createDataTable({
       name,
       slug,
       kind: body.kind === 'postType' ? 'postType' : 'data',
@@ -220,7 +218,7 @@ async function handleTablesCollection(req: Request, db: DbClient): Promise<Respo
       createdByUserId: user.id,
       updatedByUserId: user.id,
     })
-    await recordTableAuditEvent(db, user, req, 'data.table.create', table)
+    await recordTableAuditEvent(user, req, 'data.table.create', table)
     return jsonResponse({ table }, { status: 201 })
   }
 
@@ -229,14 +227,13 @@ async function handleTablesCollection(req: Request, db: DbClient): Promise<Respo
 
 async function handleTableItem(
   req: Request,
-  db: DbClient,
   tableId: string,
 ): Promise<Response> {
   // GET = schema read (Data workspace OR loop pickers in site editor).
   if (req.method === 'GET') {
-    const user = await requireAnyRead(req, db)
+    const user = await requireAnyRead(req)
     if (user instanceof Response) return user
-    const table = await getDataTable(db, tableId)
+    const table = await getDataTable(tableId)
     if (!table) return jsonResponse({ error: 'Table not found' }, { status: 404 })
     // A custom-only persona must not read a system table by id. Content-row
     // callers (loop pickers) may still resolve any table.
@@ -249,12 +246,12 @@ async function handleTableItem(
   // PATCH/DELETE = schema mutation. Resolve the table first so the manage gate
   // is kind-aware (system vs custom). Step-up gated — schema/route changes
   // affect the public URL surface.
-  const user = await requireDataTablesRead(req, db)
+  const user = await requireDataTablesRead(req)
   if (user instanceof Response) return user
-  const table = await getDataTable(db, tableId)
+  const table = await getDataTable(tableId)
   if (!table) return jsonResponse({ error: 'Table not found' }, { status: 404 })
   if (!canManageTable(user, table)) return forbidden()
-  const stepUp = await requireStepUp(req, db, user)
+  const stepUp = await requireStepUp(req, user)
   if (stepUp) return stepUp
 
   if (req.method === 'PATCH') {
@@ -268,16 +265,16 @@ async function handleTableItem(
     const frozenError = assertSystemTableUpdateAllowed(table, update)
     if (frozenError) return badRequest(frozenError)
 
-    const updated = await updateDataTable(db, tableId, update)
+    const updated = await updateDataTable(tableId, update)
     if (!updated) return jsonResponse({ error: 'Table not found' }, { status: 404 })
-    await recordTableAuditEvent(db, user, req, 'data.table.update', updated)
+    await recordTableAuditEvent(user, req, 'data.table.update', updated)
     return jsonResponse({ table: updated })
   }
 
   if (req.method === 'DELETE') {
-    const deleted = await softDeleteDataTable(db, tableId, user.id)
+    const deleted = await softDeleteDataTable(tableId, user.id)
     if (!deleted) return jsonResponse({ error: 'Table cannot be deleted' }, { status: 409 })
-    await recordTableAuditEvent(db, user, req, 'data.table.delete', deleted)
+    await recordTableAuditEvent(user, req, 'data.table.delete', deleted)
     return jsonResponse({ table: deleted })
   }
 
@@ -286,20 +283,19 @@ async function handleTableItem(
 
 async function handleTableRows(
   req: Request,
-  db: DbClient,
   tableId: string,
 ): Promise<Response> {
   const user = req.method === 'POST'
-    ? await requireDataCreator(req, db)
-    : await requireDataAccess(req, db)
+    ? await requireDataCreator(req)
+    : await requireDataAccess(req)
   if (user instanceof Response) return user
 
-  const table = await getDataTable(db, tableId)
+  const table = await getDataTable(tableId)
   if (!table) return jsonResponse({ error: 'Table not found' }, { status: 404 })
 
   if (req.method === 'GET') {
     const visibility = canSeeAllDataRows(user) ? {} : { ownerUserId: user.id }
-    return jsonResponse({ rows: await listDataRows(db, tableId, visibility) })
+    return jsonResponse({ rows: await listDataRows(tableId, visibility) })
   }
 
   if (req.method === 'POST') {
@@ -324,9 +320,9 @@ async function handleTableRows(
     })
     const slug = slugForTable(table, cells)
 
-    const row = await createDataRow(db, { tableId, cells, slug }, user.id)
-    await emitContentEntryCreated(db, row.id, { kind: 'user', userId: user.id })
-    await createAuditEvent(db, {
+    const row = await createDataRow({ tableId, cells, slug }, user.id)
+    await emitContentEntryCreated(row.id, { kind: 'user', userId: user.id })
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'data.row.create',
       targetType: 'data_row',
@@ -347,15 +343,14 @@ async function handleTableRows(
 // no rows are published yet.
 async function handleTableLoopPreview(
   req: Request,
-  db: DbClient,
   tableId: string,
 ): Promise<Response> {
   if (req.method !== 'GET') return methodNotAllowed()
 
-  const user = await requireDataAccess(req, db)
+  const user = await requireDataAccess(req)
   if (user instanceof Response) return user
 
-  const table = await getDataTable(db, tableId)
+  const table = await getDataTable(tableId)
   if (!table) return jsonResponse({ error: 'Table not found' }, { status: 404 })
 
   const url = new URL(req.url)
@@ -366,7 +361,7 @@ async function handleTableLoopPreview(
   const rawOffset = Number.parseInt(url.searchParams.get('offset') ?? '0', 10)
   const offset = Math.max(Number.isFinite(rawOffset) ? rawOffset : 0, 0)
 
-  const result = await fetchPublishedDataRowItems(db, {
+  const result = await fetchPublishedDataRowItems({
     tableId,
     orderBy,
     direction,
@@ -390,12 +385,11 @@ const TABLE_LOOP_PREVIEW_PATTERN = /^\/admin\/api\/cms\/data\/tables\/([^/]+)\/l
 
 export async function handleDataTableRoutes(
   req: Request,
-  db: DbClient,
 ): Promise<Response | null> {
   const { pathname } = new URL(req.url)
 
   if (pathname === `${CMS_API_PREFIX}/data/tables`) {
-    return handleTablesCollection(req, db)
+    return handleTablesCollection(req)
   }
 
   // Sub-routes must match before the bare `/tables/:id` so that pattern
@@ -403,17 +397,17 @@ export async function handleDataTableRoutes(
   // matches the whole tail).
   const loopPreviewMatch = pathname.match(TABLE_LOOP_PREVIEW_PATTERN)
   if (loopPreviewMatch) {
-    return handleTableLoopPreview(req, db, decodeURIComponent(loopPreviewMatch[1]))
+    return handleTableLoopPreview(req, decodeURIComponent(loopPreviewMatch[1]))
   }
 
   const rowsMatch = pathname.match(TABLE_ROWS_PATTERN)
   if (rowsMatch) {
-    return handleTableRows(req, db, decodeURIComponent(rowsMatch[1]))
+    return handleTableRows(req, decodeURIComponent(rowsMatch[1]))
   }
 
   const itemMatch = pathname.match(TABLE_ITEM_PATTERN)
   if (itemMatch) {
-    return handleTableItem(req, db, decodeURIComponent(itemMatch[1]))
+    return handleTableItem(req, decodeURIComponent(itemMatch[1]))
   }
 
   return null

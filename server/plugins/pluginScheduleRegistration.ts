@@ -15,14 +15,13 @@
  * What lives here:
  *   • `Weekday` index map for the cadence parser.
  *   • `computeNextRun(cadence, from)` — pure function, tested in isolation.
- *   • `registerPluginSchedule(db, reg)` — DB upsert that computes
- *     `next_run_at` from the cadence and namespaces the schedule id.
+ *   • `registerPluginSchedule(reg)` — upsert that computes `next_run_at`
+ *     from the cadence and namespaces the schedule id.
  *
  * `scheduler.ts` re-exports `computeNextRun` and `registerPluginSchedule`
  * so existing call sites and tests don't need to chase the move.
  */
 
-import type { DbClient } from '../db/client'
 import {
   upsertPluginSchedule,
   type Cadence,
@@ -126,11 +125,10 @@ export function pluginScheduleFullId(pluginId: string, scheduleId: string): stri
  * new cadence + handler.
  */
 export async function registerPluginSchedule(
-  db: DbClient,
   reg: ScheduleRegistration,
 ): Promise<void> {
   const nextRunAt = computeNextRun(reg.cadence, new Date()).toISOString()
-  await upsertPluginSchedule(db, {
+  await upsertPluginSchedule({
     pluginId: reg.pluginId,
     scheduleId: pluginScheduleFullId(reg.pluginId, reg.scheduleId),
     cadence: reg.cadence,

@@ -1,6 +1,5 @@
 import { tryHandleAi } from './ai/handlers'
 import { handleCmsRequest } from './handlers/cms'
-import type { DbClient } from './db/client'
 import { renderNotFoundResponse, renderPublicResolution } from './publish/publicRouter'
 import { readStaticAsset } from './publish/staticArtefact'
 import { getLatestSnapshotForVersion } from './publish/publishedSnapshotCache'
@@ -23,7 +22,6 @@ import { mediaStorageRegistry } from '@core/plugins/mediaStorageRegistry'
 const VITE_DEV_URL = 'http://localhost:5173'
 
 interface ServerRuntime {
-  db: DbClient
   staticDir?: string
   uploadsDir?: string
   /**
@@ -125,13 +123,13 @@ function tryServeHealth(_req: Request, _runtime: ServerRuntime, _url: URL, pathn
  * the broader `/admin/api/cms/` route so the AI paths don't get swallowed
  * by the CMS dispatcher.
  */
-function tryServeAi(req: Request, runtime: ServerRuntime, url: URL, _pathname: string): Promise<Response> | null {
-  return tryHandleAi(req, runtime.db, url)
+function tryServeAi(req: Request, _runtime: ServerRuntime, url: URL, _pathname: string): Promise<Response> | null {
+  return tryHandleAi(req, url)
 }
 
 function tryServeCmsApi(req: Request, runtime: ServerRuntime, _url: URL, pathname: string): Promise<Response> | null {
   if (!pathname.startsWith('/admin/api/cms/')) return null
-  return handleCmsRequest(req, runtime.db, {
+  return handleCmsRequest(req, {
     uploadsDir: runtime.uploadsDir,
     databaseUrl: runtime.databaseUrl,
   })
@@ -146,9 +144,9 @@ function tryServeLoopRuntimeAsset(req: Request, _runtime: ServerRuntime, _url: U
   return serveLoopRuntimeAsset()
 }
 
-function tryServeLoop(req: Request, runtime: ServerRuntime, url: URL, pathname: string): Promise<Response> | null {
+function tryServeLoop(req: Request, _runtime: ServerRuntime, url: URL, pathname: string): Promise<Response> | null {
   if (!pathname.startsWith('/_instatic/loop/')) return null
-  return handleLoopRequest(req, url, { db: runtime.db })
+  return handleLoopRequest(req, url)
 }
 
 /**
@@ -165,9 +163,9 @@ function tryServeHoleRuntimeAsset(req: Request, _runtime: ServerRuntime, _url: U
  * Layer C hole fragment endpoint — `/_instatic/hole/<nodeId>`.
  * Renders a dynamic node subtree on-demand and caches the result via Layer B.
  */
-function tryServeHole(req: Request, runtime: ServerRuntime, url: URL, pathname: string): Promise<Response> | null {
+function tryServeHole(req: Request, _runtime: ServerRuntime, url: URL, pathname: string): Promise<Response> | null {
   if (!pathname.startsWith('/_instatic/hole/')) return null
-  return handleHoleRequest(req, url, { db: runtime.db })
+  return handleHoleRequest(req, url)
 }
 
 /**
@@ -175,14 +173,14 @@ function tryServeHole(req: Request, runtime: ServerRuntime, url: URL, pathname: 
  * namespaced: unknown paths under the prefix 404 inside the handler rather
  * than falling through to the public-slug resolver.
  */
-function tryServeModuleJsAsset(req: Request, runtime: ServerRuntime, url: URL, pathname: string): Promise<Response> | null {
+function tryServeModuleJsAsset(req: Request, _runtime: ServerRuntime, url: URL, pathname: string): Promise<Response> | null {
   if (!isModuleJsAssetPath(pathname)) return null
-  return handleModuleJsAssetRequest(req, url, { db: runtime.db })
+  return handleModuleJsAssetRequest(req, url)
 }
 
-function tryServePublicForm(req: Request, runtime: ServerRuntime, url: URL, pathname: string): Promise<Response | null> | null {
+function tryServePublicForm(req: Request, _runtime: ServerRuntime, url: URL, pathname: string): Promise<Response | null> | null {
   if (!pathname.startsWith('/_instatic/form/')) return null
-  return handlePublicFormRequest(req, runtime.db, url)
+  return handlePublicFormRequest(req, url)
 }
 
 async function tryServeRuntimeAsset(req: Request, runtime: ServerRuntime, _url: URL, pathname: string): Promise<Response | null> {
@@ -205,7 +203,7 @@ async function tryServeRuntimeAsset(req: Request, runtime: ServerRuntime, _url: 
 
   // Fallback: assets stored in the DB (preview, or a publish whose disk write
   // failed). The live renderer keeps working off these.
-  const runtimeAsset = await getPublishedRuntimeAsset(runtime.db, pathname)
+  const runtimeAsset = await getPublishedRuntimeAsset(pathname)
   if (!runtimeAsset) return null
   return binaryResponse(runtimeAsset.bytes, {
     headers: {
@@ -262,7 +260,7 @@ async function tryServeRuntimePackageNamespace(req: Request, _runtime: ServerRun
  */
 async function tryServeSiteCssNamespace(req: Request, runtime: ServerRuntime, _url: URL, pathname: string): Promise<Response | null> {
   if (req.method !== 'GET' || !pathname.startsWith('/_instatic/css/')) return null
-  return (await serveSiteCss(runtime.db, pathname, runtime.uploadsDir)) ?? new Response('Not found', { status: 404 })
+  return (await serveSiteCss(pathname, runtime.uploadsDir)) ?? new Response('Not found', { status: 404 })
 }
 
 /**
@@ -424,7 +422,7 @@ async function tryServeAdminApp(
  */
 async function tryServePublicRoute(req: Request, runtime: ServerRuntime, url: URL, _pathname: string): Promise<Response | null> {
   if (req.method !== 'GET') return null
-  return await renderPublicResolution(runtime.db, url, runtime.uploadsDir)
+  return await renderPublicResolution(url, runtime.uploadsDir)
 }
 
 /**
@@ -432,11 +430,11 @@ async function tryServePublicRoute(req: Request, runtime: ServerRuntime, url: UR
  * they land in the setup wizard instead of seeing a confusing 404. Returns
  * null when the install is already past setup.
  */
-async function trySetupRedirect(req: Request, runtime: ServerRuntime, _url: URL, _pathname: string): Promise<Response | null> {
+async function trySetupRedirect(req: Request, _runtime: ServerRuntime, _url: URL, _pathname: string): Promise<Response | null> {
   if (req.method !== 'GET') return null
   // Sticky memo: once setup completes, this stops querying. Without it every
   // unmatched GET (bot probes, 404s) paid two COUNT queries forever.
-  const setupStatus = await getSetupStatusCached(runtime.db)
+  const setupStatus = await getSetupStatusCached()
   return setupStatus.needsSetup
     ? new Response(null, { status: 302, headers: { location: '/admin' } })
     : null
@@ -451,7 +449,7 @@ async function trySetupRedirect(req: Request, runtime: ServerRuntime, _url: URL,
  */
 async function tryServeNotFoundPage(req: Request, runtime: ServerRuntime, url: URL, _pathname: string): Promise<Response | null> {
   if (req.method !== 'GET') return null
-  return await renderNotFoundResponse(runtime.db, url, runtime.uploadsDir)
+  return await renderNotFoundResponse(url, runtime.uploadsDir)
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +524,7 @@ registerVersionedCacheReset(() => {
   cssFallbackVersion = -1
 })
 
-async function serveSiteCss(db: DbClient, pathname: string, uploadsDir?: string): Promise<Response | null> {
+async function serveSiteCss(pathname: string, uploadsDir?: string): Promise<Response | null> {
   const filename = pathname.slice('/_instatic/css/'.length)
   const match = filename.match(/^(reset|framework|style|userStyles)-([a-f0-9]{12})\.css$/)
   if (!match) return null
@@ -557,7 +555,7 @@ async function serveSiteCss(db: DbClient, pathname: string, uploadsDir?: string)
   const inflight = cssFallbackInFlight.get(cacheKey)
   const promise = inflight ?? (async (): Promise<string | null> => {
     try {
-      const content = await rebuildSiteCssFromSnapshot(db, bundleId, requestedHash, version)
+      const content = await rebuildSiteCssFromSnapshot(bundleId, requestedHash, version)
       if (cssFallbackCache.size >= CSS_FALLBACK_CACHE_MAX) cssFallbackCache.clear()
       cssFallbackCache.set(cacheKey, content)
       return content
@@ -578,12 +576,11 @@ async function serveSiteCss(db: DbClient, pathname: string, uploadsDir?: string)
  * version-keyed memo, so only `userStyles` does per-page work here.
  */
 async function rebuildSiteCssFromSnapshot(
-  db: DbClient,
   bundleId: SiteCssBundleId,
   requestedHash: string,
   version: number,
 ): Promise<string | null> {
-  const snapshot = await getLatestSnapshotForVersion(db, version)
+  const snapshot = await getLatestSnapshotForVersion(version)
   if (!snapshot) return null
 
   const pages = bundleId === 'userStyles' ? snapshot.site.pages : snapshot.site.pages.slice(0, 1)

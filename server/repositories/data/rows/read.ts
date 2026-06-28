@@ -11,13 +11,10 @@
  *   countDataRows         — non-deleted row count for a table
  *   listDataAuthorOptions — active users for the author picker
  *
- * Convex port: these are thin adapters over `convex/dataRows.ts`. The signatures
- * are frozen — the leading SQL `DbClient` handle is retained (named `_db`,
- * intentionally unused) so callers keep invoking these unchanged; it is dropped
- * when `server/db/*` is retired. Hydration of the four user refs runs through
- * `mapRow` (→ the shared `userRefAt`) over the joined rows Convex returns.
+ * Convex port: these are thin adapters over `convex/dataRows.ts`. Hydration of
+ * the four user refs runs through `mapRow` (→ the shared `userRefAt`) over the
+ * joined rows Convex returns.
  */
-import type { DbClient } from '../../../db/client'
 import type { DataRow } from '@core/data/schemas'
 import { api, getConvex } from '../../../convex/client'
 import { mapRow, isOwnedByUser } from './mapper'
@@ -32,7 +29,6 @@ interface ListDataRowsVisibility {
 }
 
 export async function listDataRows(
-  _db: DbClient,
   tableId: string,
   visibility: ListDataRowsVisibility = {},
 ): Promise<DataRow[]> {
@@ -56,13 +52,12 @@ interface DataRowIdSlug {
  * slug-uniqueness check — without paying the hydrated read's full parse per row.
  */
 export async function listDataRowIdSlugs(
-  _db: DbClient,
   tableId: string,
 ): Promise<DataRowIdSlug[]> {
   return getConvex().query(api.dataRows.listIdSlugs, { tableId })
 }
 
-export async function getDataRow(_db: DbClient, rowId: string): Promise<DataRow | null> {
+export async function getDataRow(rowId: string): Promise<DataRow | null> {
   const row = await getConvex().query(api.dataRows.getById, { rowId })
   return row ? mapRow(row) : null
 }
@@ -73,7 +68,6 @@ export async function getDataRow(_db: DbClient, rowId: string): Promise<DataRow 
  * soft-deleted.
  */
 export async function getDataRowMany(
-  _db: DbClient,
   rowIds: ReadonlyArray<string>,
 ): Promise<DataRow[]> {
   if (rowIds.length === 0) return []
@@ -83,7 +77,6 @@ export async function getDataRowMany(
 
 /** Read a non-deleted row in a table by its denormalized slug. */
 export async function getDataRowBySlug(
-  _db: DbClient,
   tableId: string,
   slug: string,
 ): Promise<DataRow | null> {
@@ -92,12 +85,10 @@ export async function getDataRowBySlug(
 }
 
 /** Count non-deleted rows in a table. */
-export async function countDataRows(_db: DbClient, tableId: string): Promise<number> {
+export async function countDataRows(tableId: string): Promise<number> {
   return getConvex().query(api.dataRows.count, { tableId })
 }
 
-export async function listDataAuthorOptions(
-  _db: DbClient,
-): Promise<Array<{ id: string; email: string; displayName: string; roleSlug: string | null; roleName: string | null }>> {
+export async function listDataAuthorOptions(): Promise<Array<{ id: string; email: string; displayName: string; roleSlug: string | null; roleName: string | null }>> {
   return getConvex().query(api.dataRows.listAuthorOptions, {})
 }

@@ -13,17 +13,12 @@
  * the type system doesn't lie about contents.
  *
  * Convex port: this file is now a thin adapter over `convex/userPreferences.ts`
- * (see §2). The exported signatures are frozen — the leading SQL `DbClient`
- * handle is retained (named `_db`, intentionally unused) so handlers keep
- * calling these unchanged while the rest of the runtime is still on the SQL
- * path; the bodies read/write through the shared `getConvex()` handle instead.
- * It is dropped wholesale when `server/db/*` is retired (§7). All row-shaping,
- * the read-then-patch upsert, and `updated_at` generation now live in the
- * Convex functions.
+ * (see §2). The bodies read/write through the shared `getConvex()` handle. All
+ * row-shaping, the read-then-patch upsert, and `updated_at` generation now live
+ * in the Convex functions.
  *
  * @see convex/userPreferences.ts  — the Convex query/mutation functions
  */
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 
 /**
@@ -38,7 +33,6 @@ import { api, getConvex } from '../convex/client'
  * repository conventions (e.g. `readMediaAssetRow`).
  */
 export async function getUserPreferenceRow(
-  _db: DbClient,
   userId: string,
   key: string,
 ): Promise<unknown | null> {
@@ -52,7 +46,6 @@ export async function getUserPreferenceRow(
  * we ever surface a preferences-debug page.
  */
 export async function upsertUserPreferenceRow(
-  _db: DbClient,
   userId: string,
   key: string,
   value: unknown,
@@ -67,7 +60,6 @@ export async function upsertUserPreferenceRow(
  * distinguishing — the wire-level handler returns 204 either way).
  */
 export async function deleteUserPreferenceRow(
-  _db: DbClient,
   userId: string,
   key: string,
 ): Promise<boolean> {

@@ -18,10 +18,10 @@
  *
  * This module consolidates the public-route surface:
  *
- *   1. `resolvePublicRoute(db, url)` walks the lookup order (page slug
+ *   1. `resolvePublicRoute(url)` walks the lookup order (page slug
  *      → data-row route → row redirect) and returns a
  *      `PublicRouteResolution`.
- *   2. `renderPublicResolution(db, url, uploadsDir?)` handles the full
+ *   2. `renderPublicResolution(url, uploadsDir?)` handles the full
  *      request. Layer A: when `uploadsDir` is set and the URL has no
  *      query string, it first tries `readArtefact` from the active
  *      publish slot. On a hit the pre-rendered HTML is returned
@@ -58,7 +58,6 @@
  *     pagination output.
  */
 
-import type { DbClient } from '../db/client'
 import type { PublishedPageSnapshot } from '../repositories/publish'
 import type { PublishedDataRow } from '@core/data/schemas'
 import { isTemplatePage, resolveNotFoundTemplate } from '@core/templates'
@@ -145,12 +144,11 @@ type PublicRouteResolution =
  * a fallback document.
  */
 async function resolvePublicRoute(
-  db: DbClient,
   url: URL,
 ): Promise<PublicRouteResolution> {
   // Page at the full slug.
   const pageSlug = publicSlugFromPath(url.pathname)
-  const pageSnapshot = await getPublishedPageBySlug(db, pageSlug)
+  const pageSnapshot = await getPublishedPageBySlug(pageSlug)
   if (pageSnapshot) {
     const page = pageSnapshot.site.pages.find((p) => p.id === pageSnapshot.pageRowId)
     if (page && !isTemplatePage(page)) {
@@ -164,19 +162,19 @@ async function resolvePublicRoute(
   const route = contentRouteFromPath(url.pathname)
   if (!route) return { kind: 'not-found' }
 
-  const row = await getPublishedDataRowByRoute(db, route.tableRouteBase, route.rowSlug)
+  const row = await getPublishedDataRowByRoute(route.tableRouteBase, route.rowSlug)
   if (row) {
     // Row routes render through explicitly authored entry templates. A missing
     // site snapshot means there is no published template surface to consult, so
     // surface that as not-found rather than inventing a fallback document. The
     // snapshot is memoised per publish version, so warm row requests skip the
     // full-site parse.
-    const siteSnapshot = await getLatestSnapshotForVersion(db, getPublishVersion())
+    const siteSnapshot = await getLatestSnapshotForVersion(getPublishVersion())
     if (!siteSnapshot) return { kind: 'not-found' }
     return { kind: 'row', snapshot: siteSnapshot, row }
   }
 
-  const redirect = await getDataRowRedirectByRoute(db, route.tableRouteBase, route.rowSlug)
+  const redirect = await getDataRowRedirectByRoute(route.tableRouteBase, route.rowSlug)
   if (redirect) {
     return { kind: 'redirect', location: `${redirect.targetPath}${url.search}` }
   }
@@ -213,7 +211,6 @@ async function resolvePublicRoute(
  * the same "render → 404" behaviour the pre-unification router had.
  */
 export async function renderPublicResolution(
-  db: DbClient,
   url: URL,
   uploadsDir?: string,
 ): Promise<Response | null> {
@@ -248,7 +245,7 @@ export async function renderPublicResolution(
 
   // Resolve outside the cache factory so redirects and not-founds are never
   // stored in the LRU.
-  const resolution = await resolvePublicRoute(db, url)
+  const resolution = await resolvePublicRoute(url)
   if (resolution.kind === 'not-found') return null
   if (resolution.kind === 'redirect') {
     return new Response(null, {
@@ -262,10 +259,10 @@ export async function renderPublicResolution(
     cacheKey,
     async () => {
       const rendered = resolution.kind === 'page'
-        ? await renderPublishedSnapshot(resolution.snapshot, { db, url })
-        : await renderPublishedDataRowTemplate(resolution.snapshot, resolution.row, { db, url })
+        ? await renderPublishedSnapshot(resolution.snapshot, { url })
+        : await renderPublishedDataRowTemplate(resolution.snapshot, resolution.row, { url })
       if (!rendered) return null
-      const html = await applyPublishedHtmlPipeline(rendered, db)
+      const html = await applyPublishedHtmlPipeline(rendered)
       return { body: html, headers: { 'content-type': 'text/html; charset=utf-8' }, status: 200 }
     },
   )
@@ -299,7 +296,6 @@ export async function renderPublicResolution(
  * path; request-dependent nodes are holes and hydrate per request anyway.
  */
 export async function renderNotFoundResponse(
-  db: DbClient,
   url: URL,
   uploadsDir?: string,
 ): Promise<Response | null> {
@@ -320,14 +316,14 @@ export async function renderNotFoundResponse(
     return new Response(warm.body, { headers: warm.headers, status: 404 })
   }
 
-  const snapshot = await getLatestSnapshotForVersion(db, getPublishVersion())
+  const snapshot = await getLatestSnapshotForVersion(getPublishVersion())
   if (!snapshot || !resolveNotFoundTemplate(snapshot.site)) return null
 
   const syntheticUrl = new URL(NOT_FOUND_ARTEFACT_URL_PATH, url.origin)
   const cached = await getOrRender(cacheKey, async () => {
-    const rendered = await renderPublishedNotFound(snapshot, { db, url: syntheticUrl })
+    const rendered = await renderPublishedNotFound(snapshot, { url: syntheticUrl })
     if (!rendered) return null
-    const html = await applyPublishedHtmlPipeline(rendered, db)
+    const html = await applyPublishedHtmlPipeline(rendered)
     return { body: html, headers: htmlHeaders, status: 200 }
   })
   if (!cached) return null

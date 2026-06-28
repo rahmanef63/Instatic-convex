@@ -23,7 +23,6 @@ import { firstImagePathFromMarkdown } from '@core/markdown/renderMarkdown'
 import { normalizeRouteBase } from '@core/templates/templateMatching'
 import { publicDataUserFromParts } from '@core/data/publicDataUser'
 import type { PublishedDataRow } from '@core/data/schemas'
-import type { DbClient } from '../db/client'
 import { walkRenderTree } from './renderTreeWalk'
 
 /**
@@ -220,7 +219,7 @@ function readPageNumber(url: URL | undefined, loopNodeId: string): number {
 async function resolveOneLoop(
   node: PageNode,
   source: LoopEntitySource,
-  ctx: { db: DbClient; site: SiteDocument; url?: URL; request?: SourceRequestContext },
+  ctx: { site: SiteDocument; url?: URL; request?: SourceRequestContext },
 ): Promise<ResolvedLoopData> {
   const props = readLoopProps(node)
   const pageNumber = props.pagination === 'infinite' ? readPageNumber(ctx.url, node.id) : 1
@@ -233,7 +232,6 @@ async function resolveOneLoop(
   }
 
   const fetchCtx: SourceFetchContext = {
-    db: ctx.db,
     site: ctx.site,
     filters: props.filters,
     orderBy: props.orderBy || (source.orderByOptions[0]?.id ?? ''),
@@ -272,7 +270,6 @@ async function resolveOneLoop(
 export async function prefetchLoopData(
   page: Page,
   site: SiteDocument,
-  db: DbClient,
   url?: URL,
   options?: {
     /** Per-request context for request-dependent sources (Layer C holes). */
@@ -295,7 +292,6 @@ export async function prefetchLoopData(
         ] as [string, ResolvedLoopData]
       }
       const data = await resolveOneLoop(node, source, {
-        db,
         site,
         url,
         request: options?.request,

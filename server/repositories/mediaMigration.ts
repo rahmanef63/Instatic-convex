@@ -24,7 +24,6 @@
  * it across adapters would be wasted work.
  */
 
-import type { DbClient } from '../db/client'
 import type { MediaVariant } from './media'
 import { api, getConvex } from '../convex/client'
 
@@ -112,7 +111,6 @@ interface MigrationBacklog {
  * why avatar/font/plugin-pack are out of scope for now.
  */
 export async function countMigrationBacklog(
-  _db: DbClient,
   targets: { original: string; variant: string },
 ): Promise<MigrationBacklog> {
   // The Convex query returns the exact originals count plus every non-deleted
@@ -141,7 +139,6 @@ export async function countMigrationBacklog(
 const PAGE_LIMIT = 50
 
 export async function listPendingOriginals(
-  _db: DbClient,
   targetAdapterId: string,
   cursor: string | null,
 ): Promise<{ items: PendingOriginal[]; nextCursor: string | null }> {
@@ -167,7 +164,6 @@ export async function listPendingOriginals(
 }
 
 export async function listAssetsWithPendingVariants(
-  _db: DbClient,
   targetAdapterId: string,
   cursor: string | null,
 ): Promise<{ items: PendingVariantContainer[]; nextCursor: string | null }> {
@@ -208,7 +204,6 @@ export async function listAssetsWithPendingVariants(
  * because migration preserves the actual content.
  */
 export async function updateAssetStorageLocation(
-  _db: DbClient,
   id: string,
   input: {
     storagePath: string
@@ -238,7 +233,6 @@ export async function updateAssetStorageLocation(
  * migration run picks the new shape up.
  */
 export async function updateVariantStorageLocation(
-  _db: DbClient,
   assetId: string,
   oldPath: string,
   next: {

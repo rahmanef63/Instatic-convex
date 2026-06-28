@@ -1,4 +1,3 @@
-import type { DbClient } from '../db/client'
 import { Type, type Static } from '@core/utils/typeboxHelpers'
 import { compiledCheck, compiledDecode } from '@core/utils/typeboxCompiler'
 import { api, getConvex } from '../convex/client'
@@ -151,7 +150,6 @@ function labelsForAuditEvent(
 }
 
 export async function createAuditEvent(
-  _db: DbClient,
   input: {
     actorUserId: string | null
     action: AuditAction
@@ -173,7 +171,7 @@ export async function createAuditEvent(
   })
 }
 
-export async function listAuditEvents(_db: DbClient, limit = 100): Promise<AuditEvent[]> {
+export async function listAuditEvents(limit = 100): Promise<AuditEvent[]> {
   const { events, users, roles } = await getConvex().query(api.audit.listEvents, { limit })
 
   const usersById = new Map<string, string>()
@@ -183,9 +181,8 @@ export async function listAuditEvents(_db: DbClient, limit = 100): Promise<Audit
   const maps = { usersById, rolesById }
 
   return events.map((event) => {
-    // `action` is a CHECK-enum column; the Convex validator widens it to
-    // `string`, so narrow it back to `AuditAction` (the same trust the SQL
-    // `db<AuditEventRow>` row typing applied).
+    // `action` is a constrained enum column; the Convex validator widens it to
+    // `string`, so narrow it back to `AuditAction`.
     const row: AuditEventRow = { ...event, action: event.action as AuditAction }
     const metadata = normalizeMetadata(row.metadata_json)
     return rowToAuditEvent(row, metadata, labelsForAuditEvent(row, metadata, maps))

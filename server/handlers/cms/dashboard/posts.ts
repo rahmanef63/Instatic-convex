@@ -3,8 +3,8 @@
  * table plus a dense 28-day publish histogram for the widget's mini bar
  * chart.
  */
-import type { DbClient } from '../../../db/client'
 import { localDayKeyFactory } from '../../../time'
+import { listDataRows, listDataTables } from '../../../repositories/data'
 import { readStatusCounts } from './shared'
 import type { DashboardRequestContext, PostsStats } from './types'
 
@@ -13,25 +13,19 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const HISTOGRAM_DAYS = 28
 
 export async function readPostsStats(
-  db: DbClient,
   _options: unknown,
   ctx: DashboardRequestContext,
 ): Promise<PostsStats> {
   const dayKeyOf = localDayKeyFactory(ctx.timeZone)
   const sinceIso = new Date(Date.now() - TWENTY_EIGHT_DAYS_MS).toISOString()
-  const { rows: postTypeRows } = await db<{ id: string }>`
-    select id
-    from data_tables
-    where kind = 'postType'
-      and deleted_at is null
-  `
-  const postTypeIds = postTypeRows.map((r) => r.id)
+  const tables = await listDataTables()
+  const postTypeIds = tables.filter((t) => t.kind === 'postType').map((t) => t.id)
 
   // Read per-table counts + the histogram in parallel — they are
-  // independent queries against the same rows.
+  // independent reads against the same rows.
   const [countsArr, histogram] = await Promise.all([
-    Promise.all(postTypeIds.map((id) => readStatusCounts(db, id))),
-    readPostsHistogram(db, postTypeIds, sinceIso, dayKeyOf),
+    Promise.all(postTypeIds.map((id) => readStatusCounts(id))),
+    readPostsHistogram(postTypeIds, sinceIso, dayKeyOf),
   ])
 
   let postsTotal = 0
@@ -64,36 +58,25 @@ export async function readPostsStats(
  * post-processes the rows into a dense [28]-array so the front-end can
  * render bars without conditional gaps.
  *
- * We deliberately pull every published row in the window and bin
- * client-side because portable date-truncation SQL is dialect-painful
- * (Postgres `::text` cast is forbidden by the `db-postgres-isms`
- * architecture gate, and SQLite stores timestamps as strings already) and,
- * critically, the day boundary depends on the viewer's timezone — which the
- * database can't know. Cardinality is bounded by the trailing-28-day window
- * times the table count — comfortably under any reasonable per-day publish
- * rate.
+ * We pull every post-type table's rows and bin them client-side because the
+ * day boundary depends on the viewer's timezone — which the data store can't
+ * know. Cardinality is bounded by the post-type table count times each
+ * table's row count — comfortably small for a dashboard snapshot.
  */
 async function readPostsHistogram(
-  db: DbClient,
   postTypeTableIds: readonly string[],
   sinceIso: string,
   dayKeyOf: (value: string | Date) => string,
 ): Promise<Map<string, number>> {
   if (postTypeTableIds.length === 0) return new Map()
-  const { rows } = await db<{ table_id: string; published_at: string | Date }>`
-    select table_id, published_at
-    from data_rows
-    where deleted_at is null
-      and status = 'published'
-      and published_at is not null
-      and published_at >= ${sinceIso}
-  `
+  const perTable = await Promise.all(postTypeTableIds.map((id) => listDataRows(id)))
   const counts = new Map<string, number>()
-  const postTypeSet = new Set(postTypeTableIds)
-  for (const r of rows) {
-    if (!postTypeSet.has(r.table_id)) continue
-    const day = dayKeyOf(r.published_at)
-    counts.set(day, (counts.get(day) ?? 0) + 1)
+  for (const rows of perTable) {
+    for (const r of rows) {
+      if (r.status !== 'published' || r.publishedAt === null || r.publishedAt < sinceIso) continue
+      const day = dayKeyOf(r.publishedAt)
+      counts.set(day, (counts.get(day) ?? 0) + 1)
+    }
   }
   return counts
 }

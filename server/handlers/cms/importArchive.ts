@@ -15,7 +15,6 @@ import { copyFile, mkdir, mkdtemp, rm, rename, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { once } from 'node:events'
 import { tmpdir } from 'node:os'
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import { jsonResponse, badRequest } from '../../http'
 import { assertPathWithin } from '../../util/pathWithin'
@@ -76,14 +75,13 @@ interface StagedArchiveMediaEntry {
 
 export async function handleImportArchiveRoute(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions = {},
 ): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== IMPORT_ARCHIVE_PATH) return null
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 
-  const user = await requireCapability(req, db, 'data.import')
+  const user = await requireCapability(req, 'data.import')
   if (user instanceof Response) return user
   if (!req.body) return badRequest('Import archive request body is required')
 
@@ -120,7 +118,7 @@ export async function handleImportArchiveRoute(
   try {
     const dataBundle = siteBundleWithoutMediaBytes(selectedManifest)
     const dataImportReq = makeInternalImportRequest(req, strategy, dataBundle)
-    const dataImportRes = await handleImportRoute(dataImportReq, db, options)
+    const dataImportRes = await handleImportRoute(dataImportReq, options)
     if (!dataImportRes || !dataImportRes.ok) {
       return dataImportRes ?? jsonResponse({ error: 'Import route did not handle archive manifest' }, { status: 500 })
     }
@@ -137,7 +135,6 @@ export async function handleImportArchiveRoute(
       try {
         mediaImported = await importStagedArchiveMediaEntries({
           stagedMedia,
-          db,
           uploadsDir: options.uploadsDir,
           importedFolderIds,
         })
@@ -169,7 +166,6 @@ async function cleanupStagedMedia(stagedMedia: StagedArchiveMedia): Promise<void
 
 async function importStagedArchiveMediaEntries(input: {
   stagedMedia: StagedArchiveMedia
-  db: DbClient
   uploadsDir: string
   importedFolderIds: Set<string>
 }): Promise<number> {
@@ -181,7 +177,7 @@ async function importStagedArchiveMediaEntries(input: {
     await mkdir(dirname(target), { recursive: true })
     await moveFile(stagedPath, target)
 
-    await importMediaAsset(input.db, {
+    await importMediaAsset({
       id: asset.id,
       filename: asset.filename,
       mimeType: asset.mimeType,
@@ -202,7 +198,7 @@ async function importStagedArchiveMediaEntries(input: {
 
     const targetFolders = asset.folderIds.filter((id) => input.importedFolderIds.has(id))
     if (targetFolders.length > 0) {
-      await assignAssetToFolders(input.db, asset.id, { add: targetFolders })
+      await assignAssetToFolders(asset.id, { add: targetFolders })
     }
     imported++
   }

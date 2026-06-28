@@ -12,9 +12,8 @@
  * `storageAdapterId` / `externallyHosted` and never derived a variant's
  * `storagePath` / `storageAdapterId`).
  *
- * Dialect rules apply: `MEDIA_ASSET_COLUMNS` is ANSI-only and spliced into
- * `db.unsafe` SELECT / RETURNING clauses; JSON columns end in `_json` and are
- * auto-(de)serialized by the SQLite adapter / Postgres jsonb.
+ * `MEDIA_ASSET_COLUMNS` is ANSI-only and spliced into SELECT / RETURNING
+ * clauses; JSON columns end in `_json`.
  */
 
 import { isoDate, isoDateOrNull } from '@core/utils/isoDate'
@@ -22,7 +21,7 @@ import type { MediaAsset, MediaVariant } from './mediaTypes'
 
 /**
  * Single source of truth for the hydrated media-asset projection. Spliced into
- * every SELECT / RETURNING via `db.unsafe` so a schema change is a one-line edit
+ * every SELECT / RETURNING so a schema change is a one-line edit
  * here instead of an 11-site lockstep edit. `storage_path` is deliberately
  * absent — it's a server-internal handle the public read paths never expose
  * (export/replace helpers append it explicitly when they need it).

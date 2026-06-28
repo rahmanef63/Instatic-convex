@@ -28,7 +28,6 @@
  * is gated separately).
  */
 
-import type { DbClient } from '../db/client'
 import { hookBus } from '@core/plugins/hookBus'
 import {
   collectFrontendInjections,
@@ -40,13 +39,12 @@ import type { RendererOutput } from './publicRenderer'
 
 export async function applyPublishedHtmlPipeline(
   rendered: RendererOutput,
-  db: DbClient,
 ): Promise<string> {
   await hookBus.emit('publish.before', {
     siteId: rendered.siteId,
     pageId: rendered.pageId,
   })
-  const injections = await collectFrontendInjections(db)
+  const injections = await collectFrontendInjections()
   const withInjections = injectFrontendAssets(rendered.html, injections)
   // Token stamping is an HTML mutation (needs the server signing secret) —
   // its own step, independent of JS injection.

@@ -36,7 +36,6 @@
  * function + one row in `MEDIA_ROUTES`", not "edit a giant if/else chain".
  * Parameterised paths use a `RegExp` pattern with a named `id` capture group.
  */
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import {
   assignAssetToFolders,
@@ -116,8 +115,8 @@ function buildMetadataPatch(body: { filename?: string; altText?: string; caption
 // Per-route handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function handleListMedia(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'media.read')
+async function handleListMedia(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'media.read')
   if (user instanceof Response) return user
 
   const url = new URL(req.url)
@@ -125,7 +124,7 @@ async function handleListMedia(req: Request, db: DbClient): Promise<Response> {
   const query = url.searchParams.get('query')?.trim().toLowerCase() ?? ''
   const limit = readLimit(url)
 
-  let assets = await listMediaAssets(db, { includeDeleted: trash })
+  let assets = await listMediaAssets({ includeDeleted: trash })
 
   // JS-side text filter (follows the intentional design of this repo — see
   // listMediaAssets comment about JS-side filtering for small media libraries).
@@ -146,14 +145,14 @@ async function handleListMedia(req: Request, db: DbClient): Promise<Response> {
   return jsonResponse({ assets: materialized })
 }
 
-async function handleUploadMedia(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'media.write')
+async function handleUploadMedia(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'media.write')
   if (user instanceof Response) return user
 
   const file = await readUploadedFile(req)
   if (!file) return badRequest('Missing file')
 
-  const result = await acceptUploadedMedia(db, {
+  const result = await acceptUploadedMedia({
     file,
     maxBytes: MAX_MEDIA_BYTES,
     allowedMimes: MEDIA_LIBRARY_MIMES,
@@ -168,32 +167,30 @@ async function handleUploadMedia(req: Request, db: DbClient): Promise<Response> 
 
 async function handleRestoreMedia(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'media.write')
+  const user = await requireCapability(req, 'media.write')
   if (user instanceof Response) return user
 
-  const restored = await restoreMediaAsset(db, params.id)
+  const restored = await restoreMediaAsset(params.id)
   if (!restored) return notFound()
   return jsonResponse({ asset: restored })
 }
 
 async function handleReplaceMedia(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
   // `media.replace` is split out of `media.write` — uniquely dangerous
   // because it silently swaps the bytes for every page that references
   // this asset (variants regenerate too).
-  const user = await requireCapability(req, db, 'media.replace')
+  const user = await requireCapability(req, 'media.replace')
   if (user instanceof Response) return user
 
   const file = await readUploadedFile(req)
   if (!file) return badRequest('Missing file')
 
-  const result = await acceptReplacementMedia(db, params.id, {
+  const result = await acceptReplacementMedia(params.id, {
     file,
     maxBytes: MAX_MEDIA_BYTES,
     allowedMimes: MEDIA_LIBRARY_MIMES,
@@ -208,10 +205,9 @@ async function handleReplaceMedia(
 
 async function handleAssignMediaFolders(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'media.write')
+  const user = await requireCapability(req, 'media.write')
   if (user instanceof Response) return user
 
   const AssignFoldersBodySchema = Type.Object({
@@ -225,17 +221,16 @@ async function handleAssignMediaFolders(
   if (add.length === 0 && remove.length === 0) {
     return badRequest('Provide `add` or `remove` folder ids')
   }
-  const asset = await assignAssetToFolders(db, params.id, { add, remove })
+  const asset = await assignAssetToFolders(params.id, { add, remove })
   if (!asset) return notFound()
   return jsonResponse({ asset })
 }
 
 async function handleUpdateMediaMetadata(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'media.write')
+  const user = await requireCapability(req, 'media.write')
   if (user instanceof Response) return user
 
   const body = await readValidatedBody(req, UpdateMediaMetadataBodySchema)
@@ -244,24 +239,23 @@ async function handleUpdateMediaMetadata(
   if (patch instanceof Response) return patch
   if (Object.keys(patch).length === 0) return badRequest('No editable fields supplied')
 
-  const asset = await updateMediaAssetMetadata(db, params.id, patch)
+  const asset = await updateMediaAssetMetadata(params.id, patch)
   if (!asset) return notFound()
   return jsonResponse({ asset })
 }
 
 async function handleDeleteMedia(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'media.delete')
+  const user = await requireCapability(req, 'media.delete')
   if (user instanceof Response) return user
 
   const url = new URL(req.url)
   const purge = readQueryFlag(url, 'purge')
 
   if (!purge) {
-    const asset = await softDeleteMediaAsset(db, params.id)
+    const asset = await softDeleteMediaAsset(params.id)
     if (!asset) return notFound()
     return jsonResponse({ asset })
   }
@@ -269,7 +263,7 @@ async function handleDeleteMedia(
   // Hard delete — only legal on already-trashed assets so a single
   // click can't bypass the trash safety net. Caller must explicitly
   // soft-delete first and then purge from the Trash view.
-  const existing = await getMediaAsset(db, params.id)
+  const existing = await getMediaAsset(params.id)
   if (!existing) return notFound()
   if (!existing.deletedAt) return badRequest('Asset must be soft-deleted before purge')
 
@@ -277,7 +271,7 @@ async function handleDeleteMedia(
   // extra bytes to sweep from each variant's adapter alongside the original.
   const variants = existing.variants
   const adapterId = existing.storageAdapterId
-  const deleted = await deleteMediaAsset(db, params.id)
+  const deleted = await deleteMediaAsset(params.id)
   if (!deleted) return notFound()
 
   await dispatchDelete(adapterId, deleted.storagePath).catch((err) => {
@@ -323,6 +317,6 @@ const MEDIA_ROUTES: readonly Route<[]>[] = [
   },
 ]
 
-export async function handleMediaRoutes(req: Request, db: DbClient): Promise<Response | null> {
-  return runRouteTable(req, db, MEDIA_ROUTES)
+export async function handleMediaRoutes(req: Request): Promise<Response | null> {
+  return runRouteTable(req, MEDIA_ROUTES)
 }

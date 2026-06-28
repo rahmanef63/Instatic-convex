@@ -9,19 +9,15 @@
  * hard-deletes rows older than 30 days.
  *
  * Convex port: the read/write bodies are thin adapters over
- * `convex/aiConversations.ts` (docs/CONVEX-MIGRATION.md §2). Exported
- * signatures are frozen — the leading SQL `DbClient` handle is retained (named
- * `_db`, unused) so handlers keep calling these unchanged; it is dropped when
- * `server/db/*` is retired (§7). The row→record mappers + `AiContentBlockSchema`
- * validation stay here so the `@core` TypeBox canon never runs in Convex's V8
- * runtime.
+ * `convex/aiConversations.ts` (docs/CONVEX-MIGRATION.md §2). The row→record
+ * mappers + `AiContentBlockSchema` validation stay here so the `@core` TypeBox
+ * canon never runs in Convex's V8 runtime.
  *
  * @see convex/aiConversations.ts — the Convex query/mutation functions
  */
 
 import { Type, safeParseValue } from '@core/utils/typeboxHelpers'
 import { AiContentBlockSchema } from '@core/ai'
-import type { DbClient } from '../../db/client'
 import { api, getConvex } from '../../convex/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import type { AiContentBlock, ToolScope } from '../runtime/types'
@@ -188,7 +184,6 @@ export function toConversationDetailView(
  * first. Served by the `by_user_scope_updated` index.
  */
 export async function listConversationsForUserScope(
-  _db: DbClient,
   userId: string,
   scope: ToolScope,
 ): Promise<ConversationRecord[]> {
@@ -204,7 +199,6 @@ export async function listConversationsForUserScope(
  * found / not yours / soft-deleted.
  */
 export async function readConversationForUser(
-  _db: DbClient,
   userId: string,
   conversationId: string,
 ): Promise<ConversationRecord | null> {
@@ -220,7 +214,6 @@ export async function readConversationForUser(
  * already verified ownership via `readConversationForUser`.
  */
 export async function listMessagesForConversation(
-  _db: DbClient,
   conversationId: string,
 ): Promise<MessageRecord[]> {
   const rows = await getConvex().query(api.aiConversations.listMessages, {
@@ -239,7 +232,6 @@ export async function listMessagesForConversation(
  * can offer "Rename this chat").
  */
 export async function createConversationForUser(
-  _db: DbClient,
   userId: string,
   input: CreateConversationInput,
 ): Promise<ConversationRecord> {
@@ -258,12 +250,11 @@ export async function createConversationForUser(
  * Patch a conversation. Pass only fields to update.
  */
 export async function updateConversationForUser(
-  _db: DbClient,
   userId: string,
   conversationId: string,
   patch: UpdateConversationInput,
 ): Promise<ConversationRecord | null> {
-  const existing = await readConversationForUser(_db, userId, conversationId)
+  const existing = await readConversationForUser(userId, conversationId)
   if (!existing) return null
 
   const nextTitle = patch.title?.trim() || existing.title
@@ -288,7 +279,6 @@ export async function updateConversationForUser(
  * Returns true when a row was matched.
  */
 export async function softDeleteConversationForUser(
-  _db: DbClient,
   userId: string,
   conversationId: string,
 ): Promise<boolean> {
@@ -304,7 +294,6 @@ export async function softDeleteConversationForUser(
  * atomic Convex mutation (§3 #14) — single-writer per conversation, so no race.
  */
 export async function appendMessage(
-  _db: DbClient,
   conversationId: string,
   input: AppendMessageInput,
 ): Promise<MessageRecord> {
@@ -333,7 +322,6 @@ export async function appendMessage(
  * explicitly, §3 #15). Returns the number of CONVERSATIONS purged.
  */
 export async function purgeSoftDeletedOlderThan(
-  _db: DbClient,
   cutoffIsoString: string,
 ): Promise<number> {
   return getConvex().mutation(api.aiConversations.purgeSoftDeleted, {

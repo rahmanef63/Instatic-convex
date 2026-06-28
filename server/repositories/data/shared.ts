@@ -118,8 +118,8 @@ export function userRefAt(
 // read (`publish.ts`) splice these so the join shape + alias set live in exactly
 // one place. Table aliases are `<prefix>_users` / `<prefix>_roles`, matching the
 // aliases `userRefColumns` reads back into `UserJoinColumns`. The fragments are
-// raw SQL text spliced into `db.unsafe()` strings — bind values still flow
-// through positional `placeholder()` params, never through these constants.
+// raw SQL text — bind values still flow through positional `placeholder()`
+// params, never through these constants.
 
 /**
  * SELECT alias fragment for one user-ref prefix — the four

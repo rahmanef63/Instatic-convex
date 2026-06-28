@@ -14,7 +14,6 @@
 import { Type } from '@core/utils/typeboxHelpers'
 import { jsonResponse, readValidatedBody, badRequest } from '../../http'
 import { requireCapability } from '../../auth/authz'
-import type { DbClient } from '../../db/client'
 import {
   createConversationForUser,
   listConversationsForUserScope,
@@ -44,16 +43,15 @@ const UpdateBodySchema = Type.Object({
 
 export function tryHandleAiConversations(
   req: Request,
-  db: DbClient,
   url: URL,
   pathname: string,
 ): Promise<Response> | null {
   if (pathname === '/admin/api/ai/conversations') {
-    return dispatchCollection(req, db, url)
+    return dispatchCollection(req, url)
   }
   const match = pathname.match(/^\/admin\/api\/ai\/conversations\/([^/]+)$/)
   if (match) {
-    return dispatchItem(req, db, match[1]!)
+    return dispatchItem(req, match[1]!)
   }
   return null
 }
@@ -62,14 +60,14 @@ export function tryHandleAiConversations(
 // Collection
 // ---------------------------------------------------------------------------
 
-async function dispatchCollection(req: Request, db: DbClient, url: URL): Promise<Response> {
-  if (req.method === 'GET') return handleList(req, db, url)
-  if (req.method === 'POST') return handleCreate(req, db)
+async function dispatchCollection(req: Request, url: URL): Promise<Response> {
+  if (req.method === 'GET') return handleList(req, url)
+  if (req.method === 'POST') return handleCreate(req)
   return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 }
 
-async function handleList(req: Request, db: DbClient, url: URL): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+async function handleList(req: Request, url: URL): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const scopeParam = url.searchParams.get('scope')
@@ -80,21 +78,20 @@ async function handleList(req: Request, db: DbClient, url: URL): Promise<Respons
     )
   }
   const records = await listConversationsForUserScope(
-    db,
     userOrResponse.id,
     scopeParam as ToolScope,
   )
   return jsonResponse({ conversations: records.map(toConversationView) })
 }
 
-async function handleCreate(req: Request, db: DbClient): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+async function handleCreate(req: Request): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const body = await readValidatedBody(req, CreateBodySchema)
   if (!body) return badRequest('Invalid request body.')
 
-  const record = await createConversationForUser(db, userOrResponse.id, body)
+  const record = await createConversationForUser(userOrResponse.id, body)
   return jsonResponse({ conversation: toConversationView(record) }, { status: 201 })
 }
 
@@ -102,41 +99,41 @@ async function handleCreate(req: Request, db: DbClient): Promise<Response> {
 // Item
 // ---------------------------------------------------------------------------
 
-async function dispatchItem(req: Request, db: DbClient, id: string): Promise<Response> {
-  if (req.method === 'GET') return handleRead(req, db, id)
-  if (req.method === 'PUT') return handleUpdate(req, db, id)
-  if (req.method === 'DELETE') return handleDelete(req, db, id)
+async function dispatchItem(req: Request, id: string): Promise<Response> {
+  if (req.method === 'GET') return handleRead(req, id)
+  if (req.method === 'PUT') return handleUpdate(req, id)
+  if (req.method === 'DELETE') return handleDelete(req, id)
   return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 }
 
-async function handleRead(req: Request, db: DbClient, id: string): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+async function handleRead(req: Request, id: string): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
-  const conv = await readConversationForUser(db, userOrResponse.id, id)
+  const conv = await readConversationForUser(userOrResponse.id, id)
   if (!conv) return jsonResponse({ error: 'Conversation not found' }, { status: 404 })
 
-  const messages = await listMessagesForConversation(db, id)
+  const messages = await listMessagesForConversation(id)
   return jsonResponse({ conversation: toConversationDetailView(conv, messages) })
 }
 
-async function handleUpdate(req: Request, db: DbClient, id: string): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+async function handleUpdate(req: Request, id: string): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const body = await readValidatedBody(req, UpdateBodySchema)
   if (!body) return badRequest('Invalid request body.')
 
-  const record = await updateConversationForUser(db, userOrResponse.id, id, body)
+  const record = await updateConversationForUser(userOrResponse.id, id, body)
   if (!record) return jsonResponse({ error: 'Conversation not found' }, { status: 404 })
   return jsonResponse({ conversation: toConversationView(record) })
 }
 
-async function handleDelete(req: Request, db: DbClient, id: string): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+async function handleDelete(req: Request, id: string): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
-  const ok = await softDeleteConversationForUser(db, userOrResponse.id, id)
+  const ok = await softDeleteConversationForUser(userOrResponse.id, id)
   if (!ok) return jsonResponse({ error: 'Conversation not found' }, { status: 404 })
   return jsonResponse({ ok: true })
 }

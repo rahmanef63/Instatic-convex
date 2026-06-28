@@ -17,7 +17,6 @@
  */
 
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiOk } from '../apiReplies'
 import { performGatedFetch } from '../network'
 import type { HostPluginRecord } from '../types'
@@ -25,7 +24,6 @@ import type { HostPluginRecord } from '../types'
 export async function handleNetworkFetch(
   msg: ApiCallFor<'network.fetch'>,
   entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [urlString, init] = msg.args
   const result = await performGatedFetch(entry, urlString, init)
@@ -35,7 +33,6 @@ export async function handleNetworkFetch(
 export async function handleNetworkAbort(
   msg: ApiCallFor<'network.abort'>,
   entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ abortId }] = msg.args
   const controller = entry.inflightFetches.get(abortId)

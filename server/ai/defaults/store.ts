@@ -10,7 +10,6 @@
  * `ai.providers.manage` capability; reading requires `ai.use`.
  */
 
-import type { DbClient } from '../../db/client'
 import { api, getConvex } from '../../convex/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import type { ToolScope } from '../runtime/types'
@@ -49,7 +48,7 @@ function rowToRecord(row: DefaultRow): DefaultRecord {
 // Read
 // ---------------------------------------------------------------------------
 
-export async function listDefaults(_db: DbClient): Promise<DefaultRecord[]> {
+export async function listDefaults(): Promise<DefaultRecord[]> {
   const rows = await getConvex().query(api.aiDefaults.list, {})
   return rows.map(rowToRecord)
 }
@@ -59,7 +58,6 @@ export async function listDefaults(_db: DbClient): Promise<DefaultRecord[]> {
 // ---------------------------------------------------------------------------
 
 export async function setDefaultForScope(
-  _db: DbClient,
   scope: ToolScope,
   credentialId: string,
   modelId: string,
@@ -75,7 +73,6 @@ export async function setDefaultForScope(
 }
 
 export async function clearDefaultForScope(
-  _db: DbClient,
   scope: ToolScope,
 ): Promise<void> {
   await getConvex().mutation(api.aiDefaults.clearForScope, { scope })

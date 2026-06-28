@@ -23,7 +23,6 @@
  * (run-now / pause / resume) require `plugins.lifecycle` AND step-up.
  * Gates are applied by the dispatcher's `resolvePluginRoutePolicy`.
  */
-import type { DbClient } from '../../../db/client'
 import { jsonResponse, methodNotAllowed } from '../../../http'
 import {
   listRecentRuns,
@@ -35,26 +34,24 @@ import { runScheduleNow } from '../../../plugins/scheduler'
 
 export async function handlePluginSchedulesList(
   req: Request,
-  db: DbClient,
   pluginId: string,
 ): Promise<Response> {
   if (req.method !== 'GET') return methodNotAllowed()
-  const schedules = await listSchedulesForPlugin(db, pluginId)
+  const schedules = await listSchedulesForPlugin(pluginId)
   const recent: Record<string, Awaited<ReturnType<typeof listRecentRuns>>> = {}
   for (const sched of schedules) {
-    recent[sched.scheduleId] = await listRecentRuns(db, pluginId, sched.scheduleId, 20)
+    recent[sched.scheduleId] = await listRecentRuns(pluginId, sched.scheduleId, 20)
   }
   return jsonResponse({ schedules, recent })
 }
 
 export async function handlePluginScheduleRunNow(
   req: Request,
-  db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<Response> {
   if (req.method !== 'POST') return methodNotAllowed()
-  const outcome = await runScheduleNow(db, pluginId, scheduleId)
+  const outcome = await runScheduleNow(pluginId, scheduleId)
   if (!outcome.ok && outcome.error === 'schedule not found') {
     return jsonResponse({ error: 'Schedule not found' }, { status: 404 })
   }
@@ -63,22 +60,20 @@ export async function handlePluginScheduleRunNow(
 
 export async function handlePluginSchedulePause(
   req: Request,
-  db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<Response> {
   if (req.method !== 'POST') return methodNotAllowed()
-  await pauseSchedule(db, pluginId, scheduleId, new Date().toISOString())
+  await pauseSchedule(pluginId, scheduleId, new Date().toISOString())
   return jsonResponse({ ok: true })
 }
 
 export async function handlePluginScheduleResume(
   req: Request,
-  db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<Response> {
   if (req.method !== 'POST') return methodNotAllowed()
-  await resumeSchedule(db, pluginId, scheduleId)
+  await resumeSchedule(pluginId, scheduleId)
   return jsonResponse({ ok: true })
 }

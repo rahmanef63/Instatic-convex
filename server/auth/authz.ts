@@ -1,4 +1,3 @@
-import type { DbClient } from '../db/client'
 import { SESSION_COOKIE_NAME, hashSessionToken } from './tokens'
 import { roleHasCapability, type CoreCapability } from './capabilities'
 import { findUserBySessionHash, getSessionStepUpExpiresAt, sessionRequiresMfa } from './sessions'
@@ -40,12 +39,11 @@ export async function getSessionHash(req: Request): Promise<string | null> {
 
 export async function requireAuthenticatedUser(
   req: Request,
-  db: DbClient,
 ): Promise<AuthUser | Response> {
   const idHash = await getSessionHash(req)
-  const user = idHash ? await findUserBySessionHash(db, idHash) : null
+  const user = idHash ? await findUserBySessionHash(idHash) : null
   if (!user) {
-    if (idHash && await sessionRequiresMfa(db, idHash)) {
+    if (idHash && await sessionRequiresMfa(idHash)) {
       return jsonResponse({ error: 'mfa_required' }, { status: 401 })
     }
     return jsonResponse({ error: 'Unauthorized' }, { status: 401 })
@@ -55,10 +53,9 @@ export async function requireAuthenticatedUser(
 
 export async function requireCapability(
   req: Request,
-  db: DbClient,
   capability: CoreCapability,
 ): Promise<AuthUser | Response> {
-  const user = await requireAuthenticatedUser(req, db)
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
   if (!userHasCapability(user, capability)) {
     return jsonResponse({ error: 'Forbidden' }, { status: 403 })
@@ -79,10 +76,9 @@ export function userHasAnyCapability(
 
 export async function requireAnyCapability(
   req: Request,
-  db: DbClient,
   capabilities: readonly CoreCapability[],
 ): Promise<AuthUser | Response> {
-  const user = await requireAuthenticatedUser(req, db)
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
   if (!userHasAnyCapability(user, capabilities)) {
     return jsonResponse({ error: 'Forbidden' }, { status: 403 })
@@ -103,9 +99,9 @@ export async function requireAnyCapability(
  * paying a second full session lookup (+ `last_seen_at` write) per request.
  *
  * Handler pattern:
- *   const user = await requireCapability(req, db, 'users.manage')
+ *   const user = await requireCapability(req, 'users.manage')
  *   if (user instanceof Response) return user
- *   const stepUp = await requireStepUp(req, db, user)
+ *   const stepUp = await requireStepUp(req, user)
  *   if (stepUp) return stepUp
  *   // …proceed, knowing the action has been re-authenticated.
  *
@@ -115,7 +111,6 @@ export async function requireAnyCapability(
  */
 export async function requireStepUp(
   req: Request,
-  db: DbClient,
   user: AuthUser,
   options: RequireStepUpOptions = {},
 ): Promise<Response | null> {
@@ -126,7 +121,7 @@ export async function requireStepUp(
   if (!idHash) {
     return jsonResponse({ error: 'step_up_required' }, { status: 401 })
   }
-  const expiresAt = await getSessionStepUpExpiresAt(db, idHash)
+  const expiresAt = await getSessionStepUpExpiresAt(idHash)
   if (!expiresAt || expiresAt.getTime() <= Date.now()) {
     return jsonResponse({ error: 'step_up_required' }, { status: 401 })
   }

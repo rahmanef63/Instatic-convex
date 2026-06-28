@@ -21,18 +21,15 @@
  *   - The `settings_json` column (`plugins.ts` owns `installed_plugins`).
  *
  * Convex port: the read/write bodies are thin adapters over
- * `convex/pluginSecrets.ts` (docs/CONVEX-MIGRATION.md §2). The leading SQL
- * `DbClient` handle on every exported signature is retained (named `_db`,
- * intentionally unused) so callers stay unchanged until `server/db/*` is
- * retired (§7). Crypto runs here; only base64 `ciphertext` / `iv` strings cross
- * the wire — Convex never sees the master key or plaintext.
+ * `convex/pluginSecrets.ts` (docs/CONVEX-MIGRATION.md §2). Crypto runs here;
+ * only base64 `ciphertext` / `iv` strings cross the wire — Convex never sees
+ * the master key or plaintext.
  *
  * Gated by `plugin-secrets-never-leak.test.ts`.
  *
  * @see convex/pluginSecrets.ts — the Convex persistence functions
  */
 
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 import {
   decryptSecret,
@@ -99,7 +96,6 @@ export interface PluginSecretState {
 }
 
 export async function listPluginSecretStates(
-  _db: DbClient,
   pluginId: string,
 ): Promise<PluginSecretState[]> {
   const rows = await getConvex().query(api.pluginSecrets.listStates, { pluginId })
@@ -145,7 +141,6 @@ async function currentFingerprintOrNull(pluginId: string): Promise<string | null
  * operator knows re-entry is needed.
  */
 export async function resolvePluginSecretsForRuntime(
-  _db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
 ): Promise<Record<string, string>> {
@@ -211,7 +206,6 @@ export async function resolvePluginSecretsForRuntime(
  * misconfigured — handlers surface it as a `{ error }` envelope.
  */
 export async function applyPluginSecretSettings(
-  _db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
   settings: PluginSettingsValues,
@@ -246,7 +240,6 @@ export async function applyPluginSecretSettings(
  * upgrade and rollback flows never clobber a value the site owner rotated.
  */
 export async function seedPluginSecretDefaults(
-  _db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
 ): Promise<void> {

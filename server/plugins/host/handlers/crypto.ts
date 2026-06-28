@@ -11,7 +11,6 @@
  */
 
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiOk } from '../apiReplies'
 import { bytesToBase64, base64ToBytes } from '../../protocol/bodyEncoding'
 import type { HostPluginRecord } from '../types'
@@ -19,7 +18,6 @@ import type { HostPluginRecord } from '../types'
 export async function handleCryptoDigest(
   msg: ApiCallFor<'crypto.digest'>,
   _entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ algorithm, data }] = msg.args
   const dataBytes = base64ToBytes(data)
@@ -30,7 +28,6 @@ export async function handleCryptoDigest(
 export async function handleCryptoSignHmac(
   msg: ApiCallFor<'crypto.signHmac'>,
   _entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ hash, key, data }] = msg.args
   const keyBuffer = base64ToBytes(key)

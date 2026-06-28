@@ -20,7 +20,6 @@ import { hookBus } from '@core/plugins/hookBus'
 import { mediaStorageRegistry } from '@core/plugins/mediaStorageRegistry'
 import { mediaVariantDelegateRegistry } from '@core/plugins/mediaVariantDelegateRegistry'
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiOk } from '../apiReplies'
 import { buildAdapterShim, runMediaUrlTransformerInWorker } from '../media'
 import type { HostPluginRecord } from '../types'
@@ -28,7 +27,6 @@ import type { HostPluginRecord } from '../types'
 export async function handleMediaRegisterStorageAdapter(
   msg: ApiCallFor<'cms.media.registerStorageAdapter'>,
   entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [arg] = msg.args
   // Schema-validated, so the cast is for the union narrowing the
@@ -56,7 +54,6 @@ export async function handleMediaRegisterStorageAdapter(
 export async function handleMediaRegisterUrlTransformer(
   msg: ApiCallFor<'cms.media.registerUrlTransformer'>,
   entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ transformerId }] = msg.args
   entry.mediaUrlTransformers.push({ pluginId: msg.pluginId, transformerId })
@@ -84,7 +81,6 @@ export async function handleMediaRegisterUrlTransformer(
 export async function handleMediaRegisterVariantDelegate(
   msg: ApiCallFor<'cms.media.registerVariantDelegate'>,
   _entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [arg] = msg.args
   // Persist in the in-memory registry so the admin UI's

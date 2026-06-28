@@ -37,7 +37,6 @@
  *   • Other roles (font / plugin-pack) return 400 "not supported".
  */
 
-import type { DbClient } from '../../db/client'
 import type { MediaAssetRole } from '@core/plugin-sdk'
 import { requireCapability } from '../../auth/authz'
 import { badRequest, jsonResponse, methodNotAllowed, readValidatedBody } from '../../http'
@@ -125,7 +124,6 @@ const MigrateBodySchema = Type.Object({
 
 export async function handleMediaStorageMigrate(
   req: Request,
-  db: DbClient,
   uploadsDir: string | undefined,
 ): Promise<Response> {
   if (req.method !== 'POST') return methodNotAllowed()
@@ -133,7 +131,7 @@ export async function handleMediaStorageMigrate(
   // `runtime.manage`) — the migration SSE moves real bytes between
   // adapters and is a separately-grantable operation from electing an
   // adapter in the first place.
-  const user = await requireCapability(req, db, 'storage.migrate')
+  const user = await requireCapability(req, 'storage.migrate')
   if (user instanceof Response) return user
   if (!uploadsDir) {
     return jsonResponse({ error: 'Uploads directory is not configured' }, { status: 500 })
@@ -151,7 +149,7 @@ export async function handleMediaStorageMigrate(
   // Migration MUST go to the currently-elected adapter for the role —
   // otherwise we'd be moving bytes to a backend new uploads aren't using,
   // which is just a slower way to strand them.
-  const electedId = await getElectedAdapterId(db, role)
+  const electedId = await getElectedAdapterId(role)
   if (electedId !== toAdapterId) {
     return badRequest(
       `Target adapter "${toAdapterId}" is not the currently-elected adapter for role "${role}" (elected: "${electedId}"). Elect it first, then migrate.`,
@@ -186,7 +184,6 @@ export async function handleMediaStorageMigrate(
       })
 
       runMigration({
-        db,
         role,
         toAdapterId,
         uploadsDir,
@@ -219,7 +216,6 @@ export async function handleMediaStorageMigrate(
 // ---------------------------------------------------------------------------
 
 interface RunMigrationArgs {
-  db: DbClient
   role: MediaAssetRole
   toAdapterId: string
   uploadsDir: string
@@ -248,7 +244,7 @@ async function runOriginalMigration(args: RunMigrationArgs): Promise<void> {
   let firstBatch: PendingOriginal[] | null = null
   for (;;) {
     if (args.signal.aborted) break
-    const page = await listPendingOriginals(args.db, args.toAdapterId, cursor)
+    const page = await listPendingOriginals(args.toAdapterId, cursor)
     if (firstBatch === null) firstBatch = page.items
     total += page.items.length
     cursor = page.nextCursor
@@ -262,7 +258,7 @@ async function runOriginalMigration(args: RunMigrationArgs): Promise<void> {
   cursor = null
   for (;;) {
     if (args.signal.aborted) break
-    const page = await listPendingOriginals(args.db, args.toAdapterId, cursor)
+    const page = await listPendingOriginals(args.toAdapterId, cursor)
     for (const item of page.items) {
       if (args.signal.aborted) break
       try {
@@ -296,7 +292,7 @@ async function migrateOneOriginal(args: RunMigrationArgs, item: PendingOriginal)
   //    finalizeWrite dance; if any step fails we bubble before touching
   //    the DB so the row keeps pointing at the source.
   const suggested = buildSuggestedStoragePath('migrated', extensionForMime(item.mimeType))
-  const dispatched = await dispatchUpload(args.db, {
+  const dispatched = await dispatchUpload({
     bytes,
     mimeType: item.mimeType,
     suggestedStoragePath: suggested,
@@ -308,7 +304,7 @@ async function migrateOneOriginal(args: RunMigrationArgs, item: PendingOriginal)
   //    (harmless; they're orphaned but still readable). A crash before
   //    3 leaves the destination orphaned (next migration pass picks the
   //    row up again because storage_adapter_id is still the source).
-  await updateAssetStorageLocation(args.db, item.id, {
+  await updateAssetStorageLocation(item.id, {
     storagePath: dispatched.storagePath,
     publicPath: dispatched.publicUrl,
     storageAdapterId: dispatched.storageAdapterId,
@@ -336,7 +332,7 @@ async function runVariantMigration(args: RunMigrationArgs): Promise<void> {
   let cursor: string | null = null
   for (;;) {
     if (args.signal.aborted) break
-    const page = await listAssetsWithPendingVariants(args.db, args.toAdapterId, cursor)
+    const page = await listAssetsWithPendingVariants(args.toAdapterId, cursor)
     for (const container of page.items) {
       for (const v of container.variants) {
         if (v.storageAdapterId !== args.toAdapterId) total += 1
@@ -350,7 +346,7 @@ async function runVariantMigration(args: RunMigrationArgs): Promise<void> {
   cursor = null
   for (;;) {
     if (args.signal.aborted) break
-    const page = await listAssetsWithPendingVariants(args.db, args.toAdapterId, cursor)
+    const page = await listAssetsWithPendingVariants(args.toAdapterId, cursor)
     for (const container of page.items) {
       if (args.signal.aborted) break
       for (const variant of container.variants) {
@@ -406,7 +402,7 @@ async function migrateOneVariant(
     `migrated-variant-w${variant.width}`,
     `.${variant.format}`,
   )
-  const dispatched = await dispatchUpload(args.db, {
+  const dispatched = await dispatchUpload({
     bytes,
     // Variants are always one of webp / jpeg / png / avif; build the
     // MIME from the format literal so the adapter sees the right one.
@@ -416,7 +412,7 @@ async function migrateOneVariant(
     variantOf: container.parentStoragePath,
   })
 
-  const updated = await updateVariantStorageLocation(args.db, container.id, variant.path, {
+  const updated = await updateVariantStorageLocation(container.id, variant.path, {
     path: dispatched.publicUrl,
     storagePath: dispatched.storagePath,
     storageAdapterId: dispatched.storageAdapterId,

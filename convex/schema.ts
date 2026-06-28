@@ -543,7 +543,8 @@ export default defineSchema({
     created_at: v.string(),
   })
     .index('by_app_id', ['id'])
-    .index('by_conversation_position', ['conversation_id', 'position']),
+    .index('by_conversation_position', ['conversation_id', 'position'])
+    .index('by_created', ['created_at']),
 
   ai_model_pricing: defineTable({
     pricing_key: v.string(),

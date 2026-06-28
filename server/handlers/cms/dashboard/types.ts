@@ -244,23 +244,13 @@ export interface RecentActivityStats {
  *   • `pluginBytes`   — sum of file sizes under `<uploadsDir>/plugins/`,
  *                        i.e. all installed plugin packages on disk.
  *                        `0` when uploads are not configured (tests).
- *   • `databaseBytes` — byte size of the underlying database. For SQLite
- *                        that is the `.db` file plus its `-wal` / `-shm`
- *                        sidecars when present; for Postgres the result
- *                        of `pg_database_size(current_database())`.
- *   • `totalBytes`    — convenience: `image + video + document + plugin +
- *                        database`. The widget formats this as the
- *                        headline stat.
- *   • `dialect`       — which database the host is running on. Surfaced
- *                        in the widget caption ("SQLite" / "Postgres")
- *                        so the operator knows where data lives.
+ *   • `totalBytes`    — convenience: `image + video + document + plugin`.
+ *                        The widget formats this as the headline stat.
  */
 export interface StorageStats {
   imageBytes: number
   videoBytes: number
   documentBytes: number
   pluginBytes: number
-  databaseBytes: number
   totalBytes: number
-  dialect: 'sqlite' | 'postgres'
 }

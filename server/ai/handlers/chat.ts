@@ -22,7 +22,6 @@
 import { Type, safeParseValue } from '@core/utils/typeboxHelpers'
 import { jsonResponse, readValidatedBody, badRequest } from '../../http'
 import { requireCapability } from '../../auth/authz'
-import type { DbClient } from '../../db/client'
 import { createAuditEvent } from '../../repositories/audit'
 import {
   appendMessage,
@@ -75,18 +74,16 @@ const VALID_SCOPES: ToolScope[] = ['site', 'content', 'data', 'plugin']
  */
 export function tryHandleAiChat(
   req: Request,
-  db: DbClient,
   pathname: string,
 ): Promise<Response> | null {
   if (!pathname.startsWith('/admin/api/ai/chat/')) return null
   const scope = pathname.slice('/admin/api/ai/chat/'.length)
   if (!VALID_SCOPES.includes(scope as ToolScope)) return null
-  return handleAiChat(req, db, scope as ToolScope)
+  return handleAiChat(req, scope as ToolScope)
 }
 
 async function handleAiChat(
   req: Request,
-  db: DbClient,
   scope: ToolScope,
 ): Promise<Response> {
   if (req.method !== 'POST') {
@@ -98,7 +95,7 @@ async function handleAiChat(
   // the caller's `ai.tools.write` capability so a Client granted chat
   // can use the agent for ideas without it being able to mutate the
   // editor store.
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
   const user = userOrResponse
 
@@ -106,7 +103,7 @@ async function handleAiChat(
   if (!chatBody) return badRequest('Invalid request body.')
   const { conversationId, prompt, snapshot } = chatBody
 
-  const conversation = await readConversationForUser(db, user.id, conversationId)
+  const conversation = await readConversationForUser(user.id, conversationId)
   if (!conversation) {
     return jsonResponse({ error: 'Conversation not found' }, { status: 404 })
   }
@@ -123,7 +120,7 @@ async function handleAiChat(
     )
   }
 
-  const credential = await readCredentialForUser(db, user.id, conversation.credentialId)
+  const credential = await readCredentialForUser(user.id, conversation.credentialId)
   if (!credential) {
     return jsonResponse(
       { error: 'Credential not found or no longer accessible.' },
@@ -146,12 +143,12 @@ async function handleAiChat(
 
   // Append the user's message BEFORE streaming so it's persisted even if
   // the stream aborts mid-response.
-  await appendMessage(db, conversation.id, {
+  await appendMessage(conversation.id, {
     role: 'user',
     content: [{ kind: 'text', text: prompt }],
   })
 
-  const existingMessages = await listMessagesForConversation(db, conversation.id)
+  const existingMessages = await listMessagesForConversation(conversation.id)
   const messages = buildMessageHistory(existingMessages)
 
   const systemPrompt = buildSystemPromptForScope(scope, snapshot)
@@ -165,7 +162,7 @@ async function handleAiChat(
     cost: conversation.costUsdTotal,
   }
 
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'ai.chat.started',
     targetType: 'ai_conversation',
@@ -214,7 +211,6 @@ async function handleAiChat(
         // onSnapshot after each mutating browser tool — so a read tool run
         // later in the same turn sees current state, not stale turn-start state.
         const toolContextBase = {
-          db,
           userId: user.id,
           capabilities: user.capabilities,
           scope,
@@ -244,14 +240,14 @@ async function handleAiChat(
           toolContextBase,
         }
 
-        const persister = createConversationsPersister(db, conversation.id, {
+        const persister = createConversationsPersister(conversation.id, {
           providerId: credential.providerId,
           modelId: conversation.modelId,
         })
         await runChat({ driver, request, persister, emit })
 
         // Best-effort: record that this credential was used.
-        await touchCredentialLastUsed(db, credential.id).catch(() => { /* noop */ })
+        await touchCredentialLastUsed(credential.id).catch(() => { /* noop */ })
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err)
         // Full Error preserves the stack trace in the operator's terminal.
@@ -264,11 +260,11 @@ async function handleAiChat(
         // Emit the terminal audit event. Re-read the conversation row to
         // capture the deltas the persister just committed.
         try {
-          const post = await readConversationForUser(db, user.id, conversation.id)
+          const post = await readConversationForUser(user.id, conversation.id)
           const promptDelta = post ? post.promptTokensTotal - tokensAtStart.prompt : 0
           const completionDelta = post ? post.completionTokensTotal - tokensAtStart.completion : 0
           const costDelta = post ? Number((post.costUsdTotal - tokensAtStart.cost).toFixed(6)) : 0
-          await createAuditEvent(db, {
+          await createAuditEvent({
             actorUserId: user.id,
             action: streamError ? 'ai.chat.failed' : 'ai.chat.completed',
             targetType: 'ai_conversation',

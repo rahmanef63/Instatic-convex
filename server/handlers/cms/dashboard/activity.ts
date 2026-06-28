@@ -13,10 +13,11 @@
  *     Route-base lookups are batched against `data_tables` to avoid an
  *     N+1 over the visible window.
  */
-import type { DbClient } from '../../../db/client'
 import type { AuditAction } from '../../../repositories/audit'
 import { isoDateOrNull } from '@core/utils/isoDate'
-import { computeGravatarHash } from '../../../repositories/users'
+import { listAuditEvents } from '../../../repositories/audit'
+import { listUsers } from '../../../repositories/users'
+import { listDataTables } from '../../../repositories/data'
 import { buildRowPath } from './shared'
 import type { RecentActivityActor, RecentActivityEntry, RecentActivityStats } from './types'
 
@@ -24,8 +25,8 @@ const WIDGET_LIMIT = 10
 // Oversized window so we can drop login.* noise (filtered in JS; see
 // `isDashboardActivityNoise`) and still have enough rows to fill the
 // widget. 50 is the practical ceiling: even a busy admin afternoon
-// rarely produces more than that, and the `audit_events` table has an
-// index on `created_at desc` so this is a cheap scan.
+// rarely produces more than that, and the audit feed is returned
+// newest-first so this is a cheap read.
 const FETCH_LIMIT = 50
 
 type ActivityRow = {
@@ -39,45 +40,42 @@ type ActivityRow = {
   actor_display_name: string | null
   actor_email: string | null
   actor_avatar_path: string | null
+  actor_gravatar_hash: string | null
   target_user_display_name: string | null
   target_user_email: string | null
 }
 
-export async function readRecentActivity(db: DbClient): Promise<RecentActivityStats> {
-  // `where action in (...)` would be dialect-painful (Postgres requires
-  // ANY($n::text[]) and SQLite needs an inline expansion that the tagged-
-  // template binding here can't produce). The set is small and bounded,
-  // so we filter client-side after the query — same end result, dialect-
-  // naive query.
-  //
-  // The actor join also pulls `media_assets.public_path` for the actor's
-  // uploaded avatar (via `users.avatar_media_id`) so the widget can
-  // render the same `<UserAvatar>` primitive the toolbar and Users page
-  // use — uploaded image first, Gravatar fallback (computed from email
-  // below), then initials.
-  const { rows } = await db<ActivityRow>`
-    select e.id,
-           e.actor_user_id,
-           e.action,
-           e.target_type,
-           e.target_id,
-           e.metadata_json,
-           e.created_at,
-           u.display_name as actor_display_name,
-           u.email as actor_email,
-           am.public_path as actor_avatar_path,
-           tu.display_name as target_user_display_name,
-           tu.email as target_user_email
-    from audit_events e
-    left join users u on u.id = e.actor_user_id
-    left join media_assets am on am.id = u.avatar_media_id
-    left join users tu on tu.id = e.target_id and e.target_type = 'user'
-    order by e.created_at desc
-    limit ${FETCH_LIMIT}
-  `
+export async function readRecentActivity(): Promise<RecentActivityStats> {
+  // The actor / target-user enrichment that the old SQL did via joins is now
+  // assembled in-process: the audit feed gives the events, `listUsers()`
+  // supplies the current display name / email / avatar / gravatar for each
+  // user id (uploaded image first, Gravatar fallback, then initials), and the
+  // table list resolves data-row route bases.
+  const [events, users] = await Promise.all([listAuditEvents(FETCH_LIMIT), listUsers()])
+  const usersById = new Map(users.map((u) => [u.id, u]))
+
+  const rows: ActivityRow[] = events.map((e) => {
+    const actor = e.actorUserId ? usersById.get(e.actorUserId) : undefined
+    const targetUser = e.targetType === 'user' && e.targetId ? usersById.get(e.targetId) : undefined
+    return {
+      id: e.id,
+      actor_user_id: e.actorUserId,
+      action: e.action,
+      target_type: e.targetType,
+      target_id: e.targetId,
+      metadata_json: e.metadata,
+      created_at: e.createdAt,
+      actor_display_name: actor?.displayName ?? null,
+      actor_email: actor?.email ?? null,
+      actor_avatar_path: actor?.avatarUrl ?? null,
+      actor_gravatar_hash: actor?.gravatarHash ?? null,
+      target_user_display_name: targetUser?.displayName ?? null,
+      target_user_email: targetUser?.email ?? null,
+    }
+  })
 
   const visible = rows.filter((r) => !isDashboardActivityNoise(r.action)).slice(0, WIDGET_LIMIT)
-  const routeBaseById = await loadRouteBases(db, visible)
+  const routeBaseById = await loadRouteBases(visible)
 
   return {
     rows: visible.map((r): RecentActivityEntry => projectActivityRow(r, routeBaseById)),
@@ -101,7 +99,6 @@ function isDashboardActivityNoise(action: AuditAction): boolean {
  * `/${tableId}/` fallback.
  */
 async function loadRouteBases(
-  db: DbClient,
   visible: readonly ActivityRow[],
 ): Promise<Map<string, string | null>> {
   const tableIds = new Set<string>()
@@ -113,11 +110,10 @@ async function loadRouteBases(
     }
   }
   const routeBaseById = new Map<string, string | null>()
-  for (const id of tableIds) {
-    const { rows } = await db<{ route_base: string | null }>`
-      select route_base from data_tables where id = ${id}
-    `
-    routeBaseById.set(id, rows[0]?.route_base ?? null)
+  if (tableIds.size === 0) return routeBaseById
+  const tables = await listDataTables()
+  for (const table of tables) {
+    if (tableIds.has(table.id)) routeBaseById.set(table.id, table.routeBase)
   }
   return routeBaseById
 }
@@ -154,7 +150,7 @@ function buildActor(row: ActivityRow): RecentActivityActor | null {
     displayName: row.actor_display_name ?? '',
     email: row.actor_email,
     avatarUrl: row.actor_avatar_path,
-    gravatarHash: computeGravatarHash(row.actor_email),
+    gravatarHash: row.actor_gravatar_hash ?? '',
   }
 }
 

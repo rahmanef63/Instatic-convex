@@ -123,7 +123,7 @@ export interface AiStreamRequest {
   readonly bridge: AiBrowserBridge
   /**
    * Base for the per-call `ToolContext` the driver builds when invoking a
-   * server-side tool handler. Carries db + identity + scope + the per-turn
+   * server-side tool handler. Carries identity + scope + the per-turn
    * snapshot; drivers add `signal` and pass the whole thing to the handler.
    *
    * Threading this through the request avoids the module-level "active
@@ -139,7 +139,6 @@ export interface AiStreamRequest {
  * `ToolContext` by spreading this and adding their own signal.
  */
 export interface ToolContextBase {
-  readonly db: import('../../db/client').DbClient
   readonly userId: string
   /** The caller's capability set — threaded into ToolContext for the re-check gate. */
   readonly capabilities: readonly CoreCapability[]

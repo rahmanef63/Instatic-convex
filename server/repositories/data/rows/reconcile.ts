@@ -17,12 +17,10 @@
  * A write whose id matches a SOFT-DELETED row revives that row instead of
  * inserting (undo of a delete re-submits the page with its original id).
  *
- * Convex port: a thin adapter. The signatures are frozen — the leading SQL
- * `DbClient` handle is retained (named `_db`, intentionally unused). `rowsToReap`
- * stays here as the pure reap predicate (the Convex mutation reimplements the
- * same logic inline, since it cannot import this server module).
+ * Convex port: a thin adapter. `rowsToReap` stays here as the pure reap
+ * predicate (the Convex mutation reimplements the same logic inline, since it
+ * cannot import this server module).
  */
-import type { DbClient } from '../../../db/client'
 import { api, getConvex } from '../../../convex/client'
 
 /**
@@ -66,7 +64,6 @@ export interface ReconcileRowRosterInput {
  * routes (pages) bump the publish version AFTER the mutation commits.
  */
 export async function reconcileDataRowRoster(
-  _db: DbClient,
   { tableId, writes, keepIds, baselineIds, actorUserId }: ReconcileRowRosterInput,
 ): Promise<{ reapedPublished: boolean }> {
   return getConvex().mutation(api.dataRows.reconcileRoster, {

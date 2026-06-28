@@ -20,7 +20,6 @@
  */
 import { basename } from 'node:path'
 import { nanoid } from 'nanoid'
-import type { DbClient } from '../../db/client'
 import {
   createMediaAsset,
   getMediaAsset,
@@ -271,7 +270,6 @@ async function validateUploadedMedia(input: AcceptUploadInput): Promise<Response
  * boundary.
  */
 export async function acceptUploadedMedia(
-  db: DbClient,
   input: AcceptUploadInput,
 ): Promise<Response | Awaited<ReturnType<typeof createMediaAsset>>> {
   const validated = await validateUploadedMedia(input)
@@ -285,7 +283,7 @@ export async function acceptUploadedMedia(
 
   let dispatched
   try {
-    dispatched = await dispatchUpload(db, {
+    dispatched = await dispatchUpload({
       bytes: validated.bytes,
       mimeType: validated.detectedMime,
       suggestedStoragePath,
@@ -298,7 +296,7 @@ export async function acceptUploadedMedia(
     throw err
   }
 
-  const asset = await createMediaAsset(db, {
+  const asset = await createMediaAsset({
     id: nanoid(),
     filename: input.file.name || storageName,
     mimeType: validated.detectedMime,
@@ -317,9 +315,9 @@ export async function acceptUploadedMedia(
   // has no variants and consumers fall back to the original. Logged at the
   // boundary in `mediaVariants.ts`.
   if (shouldProcessResponsiveVariants(validated.detectedMime)) {
-    const processed = await processImageVariants(db, validated.bytes, dispatched.storagePath)
+    const processed = await processImageVariants(validated.bytes, dispatched.storagePath)
     if (processed) {
-      const upgraded = await setMediaAssetVariants(db, asset.id, {
+      const upgraded = await setMediaAssetVariants(asset.id, {
         width: processed.width,
         height: processed.height,
         blurHash: processed.blurHash,
@@ -351,18 +349,17 @@ export async function acceptUploadedMedia(
  *      is orphaned bytes the user can sweep later.
  */
 export async function acceptReplacementMedia(
-  db: DbClient,
   assetId: string,
   input: AcceptUploadInput,
 ): Promise<Response | Awaited<ReturnType<typeof replaceMediaAssetBinary>>> {
   const validated = await validateUploadedMedia(input)
   if (validated instanceof Response) return validated
 
-  const previous = await getMediaAsset(db, assetId)
+  const previous = await getMediaAsset(assetId)
   if (!previous) {
     return jsonResponse({ error: 'Media asset not found' }, { status: 404 })
   }
-  const previousStoragePath = await getMediaAssetStoragePath(db, assetId)
+  const previousStoragePath = await getMediaAssetStoragePath(assetId)
   if (!previousStoragePath) {
     return jsonResponse({ error: 'Media asset not found' }, { status: 404 })
   }
@@ -370,14 +367,14 @@ export async function acceptReplacementMedia(
   // can sweep them off the backend after the replace lands. The new
   // variant ladder is derived from the new binary's dimensions, so the
   // old files are guaranteed to be orphaned regardless of width overlap.
-  const previousVariants = await getMediaAssetVariants(db, assetId)
+  const previousVariants = await getMediaAssetVariants(assetId)
 
   const storageName = `${safeStorageStem(input.file.name)}${EXTENSION_FOR_MIME[validated.detectedMime]}`
   const suggestedStoragePath = buildSuggestedStoragePath(safeStorageStem(input.file.name), EXTENSION_FOR_MIME[validated.detectedMime])
 
   let dispatched
   try {
-    dispatched = await dispatchUpload(db, {
+    dispatched = await dispatchUpload({
       bytes: validated.bytes,
       mimeType: validated.detectedMime,
       suggestedStoragePath,
@@ -390,7 +387,7 @@ export async function acceptReplacementMedia(
     throw err
   }
 
-  const updated = await replaceMediaAssetBinary(db, assetId, {
+  const updated = await replaceMediaAssetBinary(assetId, {
     filename: input.file.name || storageName,
     mimeType: validated.detectedMime,
     sizeBytes: input.file.size,
@@ -415,9 +412,9 @@ export async function acceptReplacementMedia(
   // variants — consumers fall back to the original gracefully.
   let finalAsset = updated
   if (shouldProcessResponsiveVariants(validated.detectedMime)) {
-    const processed = await processImageVariants(db, validated.bytes, dispatched.storagePath)
+    const processed = await processImageVariants(validated.bytes, dispatched.storagePath)
     if (processed) {
-      const upgraded = await setMediaAssetVariants(db, assetId, {
+      const upgraded = await setMediaAssetVariants(assetId, {
         width: processed.width,
         height: processed.height,
         blurHash: processed.blurHash,
@@ -428,7 +425,7 @@ export async function acceptReplacementMedia(
       // Pipeline failed but the row already carries stale width/height/
       // blur from the previous binary — clear them so consumers know there's
       // no responsive ladder for the new binary either.
-      const cleared = await setMediaAssetVariants(db, assetId, {
+      const cleared = await setMediaAssetVariants(assetId, {
         width: null,
         height: null,
         blurHash: null,
@@ -438,7 +435,7 @@ export async function acceptReplacementMedia(
     }
   } else {
     // Non-image replace: drop any leftover image variants/dimensions.
-    const cleared = await setMediaAssetVariants(db, assetId, {
+    const cleared = await setMediaAssetVariants(assetId, {
       width: null,
       height: null,
       blurHash: null,

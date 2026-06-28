@@ -28,7 +28,6 @@
  * second validation layer on the server. The adapter validates via
  * validateVisualComponents immediately after conversion.
  */
-import type { DbClient } from '../../db/client'
 import { requireAnyCapability, requireCapability } from '../../auth/authz'
 import type { CoreCapability } from '../../auth/capabilities'
 import { listDataRows, reconcileDataRowRoster } from '../../repositories/data'
@@ -46,20 +45,20 @@ const COMPONENT_WRITE_CAPABILITIES = [
   'site.style.edit',
 ] satisfies CoreCapability[]
 
-export async function handleComponentsRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handleComponentsRoutes(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== `${CMS_API_PREFIX}/components`) return null
 
   if (req.method === 'GET') {
-    const user = await requireCapability(req, db, 'site.read')
+    const user = await requireCapability(req, 'site.read')
     if (user instanceof Response) return user
 
-    const rows = await listDataRows(db, 'components')
+    const rows = await listDataRows('components')
     return jsonResponse({ rows })
   }
 
   if (req.method === 'PUT') {
-    const user = await requireAnyCapability(req, db, COMPONENT_WRITE_CAPABILITIES)
+    const user = await requireAnyCapability(req, COMPONENT_WRITE_CAPABILITIES)
     if (user instanceof Response) return user
 
     const ComponentsBodySchema = Type.Object({
@@ -79,7 +78,7 @@ export async function handleComponentsRoutes(req: Request, db: DbClient): Promis
     // so validation merges the changed batch over the stored roster. This runs
     // OUTSIDE the transaction (sanitization is CPU work; the SQLite adapter
     // serializes every transaction through one chain).
-    const existingRows = await listDataRows(db, 'components')
+    const existingRows = await listDataRows('components')
     const existingVCs = existingRows.flatMap((r) => {
       const vc = visualComponentFromRow(r)
       return vc ? [vc] : []
@@ -117,7 +116,7 @@ export async function handleComponentsRoutes(req: Request, db: DbClient): Promis
 
     // Batch reconcile: soft-delete / create / update in one short transaction
     // (reap-first + two-phase slug writes — see rows/reconcile.ts).
-    await reconcileDataRowRoster(db, {
+    await reconcileDataRowRoster({
       tableId: 'components',
       writes: components.map((vc) => ({
         id: vc.id,

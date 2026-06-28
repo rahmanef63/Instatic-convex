@@ -7,7 +7,7 @@
  *   1. **Cadence math** — compute the next `next_run_at` from a `Cadence`
  *      shape. Pure function; tested in isolation.
  *
- *   2. **Registration** — `registerPluginSchedule(db, ...)` upserts the
+ *   2. **Registration** — `registerPluginSchedule(...)` upserts the
  *      schedule row, computes `next_run_at` if missing, and marks the
  *      schedule as "claimed" by a live VM handler. Called from the
  *      `host/apiDispatch.ts` schedule handler when the plugin invokes
@@ -16,17 +16,10 @@
  *   3. **Tick** — every `TICK_INTERVAL_MS` (default 10s), select due
  *      schedules and dispatch each to its plugin's worker. Atomic claim
  *      via `tryClaimSchedule` so two HA instances can't fire the same
- *      schedule twice. The shared leader-election layer
- *      (`withSchedulerLeaderLock` in `server/db/advisoryLock.ts`) is the
- *      FIRST gate; per-row claim is the second.
+ *      schedule twice — the Convex per-row atomic claim is the single gate
+ *      against double-run.
  *
- *   4. **HA leader election** — via the shared `withSchedulerLeaderLock`
- *      (`server/db/advisoryLock.ts`), so only ONE host instance ticks at a
- *      time when running against Postgres. Against SQLite (single-instance by
- *      definition) this is a no-op. The lock is released between ticks so a
- *      leader crash hands off naturally to the next tick on another instance.
- *
- *   5. **Failure cap + auto-pause** — after FAILURE_CAP consecutive
+ *   4. **Failure cap + auto-pause** — after FAILURE_CAP consecutive
  *      failures, the schedule is paused (`paused = true`, independent of
  *      the registration-owned `enabled` flag, so the pause survives
  *      restarts) and the operator must explicitly resume from the admin UI.
@@ -36,8 +29,6 @@
  * here so the rest of the system can stay ignorant of scheduling.
  */
 import { nanoid } from 'nanoid'
-import type { DbClient } from '../db/client'
-import { withSchedulerLeaderLock } from '../db/advisoryLock'
 import {
   finalizeScheduleRun,
   insertScheduleRun,
@@ -70,8 +61,6 @@ const TICK_BATCH_LIMIT = 50
 const LOCK_MULTIPLIER = 2
 /** Auto-pause threshold. After this many consecutive failures, the row flips `paused=true`. */
 const FAILURE_CAP = 5
-/** Postgres advisory-lock key — must be a bigint. Derived from the string below for human readability. */
-const ADVISORY_LOCK_KEY = 712830541 // = djb2('instatic-plugin-scheduler') mod 2^31
 /** Run-history rolling trim runs at most this often (don't churn every tick). */
 const HISTORY_TRIM_INTERVAL_MS = 5 * 60 * 1000
 
@@ -86,14 +75,13 @@ const HISTORY_TRIM_INTERVAL_MS = 5 * 60 * 1000
  * with the current status.
  */
 export async function runScheduleNow(
-  db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<{ ok: boolean; status: ScheduleStatus; error?: string; durationMs: number }> {
-  const schedules = await listSchedulesForPlugin(db, pluginId)
+  const schedules = await listSchedulesForPlugin(pluginId)
   const sched = schedules.find((s) => s.scheduleId === scheduleId)
   if (!sched) return { ok: false, status: 'error', error: 'schedule not found', durationMs: 0 }
-  return await fireSchedule(db, sched, 'run-now')
+  return await fireSchedule(sched, 'run-now')
 }
 
 // ---------------------------------------------------------------------------
@@ -109,13 +97,12 @@ let lastHistoryTrimAt = 0
 
 /**
  * Start the scheduler tick. Idempotent — calling it twice is a no-op.
- * Called from `runtime.ts:activateInstalledServerPlugins` on every boot
- * + re-bind so the tick is always pointed at the current DbClient.
+ * Called from `runtime.ts:activateInstalledServerPlugins` on every boot.
  */
-export function startScheduler(db: DbClient): void {
+export function startScheduler(): void {
   if (tickTimer !== null) return
   tickTimer = setInterval(() => {
-    void tickPluginScheduler(db).catch((err) => {
+    void tickPluginScheduler().catch((err) => {
       console.error('[plugin-scheduler] tick failed:', err)
     })
   }, TICK_INTERVAL_MS)
@@ -126,35 +113,32 @@ export function startScheduler(db: DbClient): void {
  * `startScheduler` and lets `setInterval` drive.
  *
  * Race shape:
- *   ┌── leader election (advisory lock)
- *   │     ↓ acquired
- *   │     select due schedules
- *   │     for each:
- *   │       try row-level claim (`running_token` flip)
- *   │       ↓ won
- *   │       fire handler in plugin's worker
- *   │       record outcome (status, duration, advance next_run_at, decrement/reset failures, maybe pause)
- *   │     release advisory lock
- *   └── (next instance ticks next interval)
+ *   select due schedules
+ *   for each:
+ *     try row-level claim (`running_token` flip) — atomic per-row in Convex
+ *     ↓ won
+ *     fire handler in plugin's worker
+ *     record outcome (status, duration, advance next_run_at, decrement/reset failures, maybe pause)
+ *
+ * Two HA instances can tick concurrently; the per-row atomic claim guarantees
+ * each due schedule fires at most once.
  */
-export async function tickPluginScheduler(db: DbClient): Promise<void> {
-  await withSchedulerLeaderLock(db, ADVISORY_LOCK_KEY, '[plugin-scheduler]', async () => {
-    const now = new Date()
-    // `selectDueSchedules` already filters to enabled, un-paused schedules
-    // of enabled plugins — no re-check needed here.
-    const due = await selectDueSchedules(db, now.toISOString(), TICK_BATCH_LIMIT)
-    for (const sched of due) {
-      await fireSchedule(db, sched, 'tick')
-    }
-    // Cheap rolling trim — keeps `plugin_schedule_runs` bounded without
-    // hitting it every tick.
-    if (Date.now() - lastHistoryTrimAt > HISTORY_TRIM_INTERVAL_MS) {
-      lastHistoryTrimAt = Date.now()
-      await trimScheduleRunHistory(db).catch((err) => {
-        console.error('[plugin-scheduler] history trim failed:', err)
-      })
-    }
-  })
+export async function tickPluginScheduler(): Promise<void> {
+  const now = new Date()
+  // `selectDueSchedules` already filters to enabled, un-paused schedules
+  // of enabled plugins — no re-check needed here.
+  const due = await selectDueSchedules(now.toISOString(), TICK_BATCH_LIMIT)
+  for (const sched of due) {
+    await fireSchedule(sched, 'tick')
+  }
+  // Cheap rolling trim — keeps `plugin_schedule_runs` bounded without
+  // hitting it every tick.
+  if (Date.now() - lastHistoryTrimAt > HISTORY_TRIM_INTERVAL_MS) {
+    lastHistoryTrimAt = Date.now()
+    await trimScheduleRunHistory().catch((err) => {
+      console.error('[plugin-scheduler] history trim failed:', err)
+    })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +146,6 @@ export async function tickPluginScheduler(db: DbClient): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function fireSchedule(
-  db: DbClient,
   sched: PluginSchedule,
   trigger: 'tick' | 'run-now',
 ): Promise<{ ok: boolean; status: ScheduleStatus; error?: string; durationMs: number }> {
@@ -173,18 +156,18 @@ async function fireSchedule(
   // Atomic claim — if another tick (or another HA instance) is ahead of
   // us, this returns false and we move on. Two ticks cannot fire the
   // same schedule simultaneously.
-  const claimed = await tryClaimSchedule(db, sched.pluginId, sched.scheduleId, token, lockUntilIso, nowIso)
+  const claimed = await tryClaimSchedule(sched.pluginId, sched.scheduleId, token, lockUntilIso, nowIso)
   if (!claimed) return { ok: false, status: 'error', error: 'already-claimed', durationMs: 0 }
 
   const runId = nanoid()
-  await insertScheduleRun(db, {
+  await insertScheduleRun({
     id: runId,
     pluginId: sched.pluginId,
     scheduleId: sched.scheduleId,
     startedAt: nowIso,
     triggeredBy: trigger,
   })
-  await markScheduleRunStarted(db, sched.pluginId, sched.scheduleId, nowIso)
+  await markScheduleRunStarted(sched.pluginId, sched.scheduleId, nowIso)
 
   let outcome: { ok: boolean; status: 'ok' | 'error' | 'timeout'; error?: string; durationMs: number }
   try {
@@ -207,7 +190,7 @@ async function fireSchedule(
 
   const finishedAt = new Date()
   const finishedIso = finishedAt.toISOString()
-  await finalizeScheduleRun(db, runId, {
+  await finalizeScheduleRun(runId, {
     finishedAt: finishedIso,
     status: outcome.status,
     error: outcome.error ?? null,
@@ -215,7 +198,7 @@ async function fireSchedule(
   })
 
   const nextRunAt = computeNextRun(sched.cadence, finishedAt).toISOString()
-  await recordScheduleRunOutcome(db, {
+  await recordScheduleRunOutcome({
     pluginId: sched.pluginId,
     scheduleId: sched.scheduleId,
     token,
@@ -230,7 +213,7 @@ async function fireSchedule(
   if (!outcome.ok) {
     const nextFailures = sched.consecutiveFailures + 1
     if (nextFailures >= FAILURE_CAP) {
-      await pauseSchedule(db, sched.pluginId, sched.scheduleId, finishedIso)
+      await pauseSchedule(sched.pluginId, sched.scheduleId, finishedIso)
       console.error(
         `[plugin-scheduler] ${sched.pluginId}/${sched.scheduleId} paused after ${nextFailures} consecutive failures (last: ${outcome.error ?? 'unknown'})`,
       )

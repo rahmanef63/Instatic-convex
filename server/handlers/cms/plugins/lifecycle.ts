@@ -9,7 +9,6 @@
  * `runPluginMigrate` so it can sequence migrate between deactivate and
  * activate atomically.
  */
-import type { DbClient } from '../../../db/client'
 import { setPluginLifecycleStatus } from '../../../repositories/plugins'
 import type {
   InstalledPlugin,
@@ -36,7 +35,6 @@ interface LifecycleHookResult {
 }
 
 export async function runPluginLifecycleHook(
-  db: DbClient,
   plugin: InstalledPlugin,
   options: CmsHandlerOptions,
   hook: Exclude<ServerPluginLifecycleHook, 'migrate'>,
@@ -49,7 +47,7 @@ export async function runPluginLifecycleHook(
     // seeds them into its local mirror — the rows carry the canonical
     // values (non-secret settings + decrypted secrets) and any prior
     // in-process cache may be stale (e.g. after a settings PUT).
-    await primePluginSettingsCache(db, plugin)
+    await primePluginSettingsCache(plugin)
 
     // Canvas module pack — host-side, separate from worker. Activate when
     // entering active state; deactivate when leaving.
@@ -73,7 +71,7 @@ export async function runPluginLifecycleHook(
     // plugins without `entrypoints.server`), then run the named hook.
     const loaded = await loadPluginServerEntrypoint(manifest, options.uploadsDir)
     if (loaded) {
-      await runPluginLifecycle(db, plugin.id, hook)
+      await runPluginLifecycle(plugin.id, hook)
     }
 
     // After deactivate / uninstall the plugin should not stay loaded in
@@ -83,7 +81,7 @@ export async function runPluginLifecycleHook(
       await unloadPlugin(plugin.id)
     }
 
-    const updatedResult = await setPluginLifecycleStatus(db, plugin.id, successStatus)
+    const updatedResult = await setPluginLifecycleStatus(plugin.id, successStatus)
     const updated = updatedResult?.kind === 'ok' ? updatedResult.plugin : null
     return { plugin: updated ?? plugin, ok: true }
   } catch (err) {
@@ -93,7 +91,7 @@ export async function runPluginLifecycleHook(
       try { await unloadPlugin(plugin.id) } catch { /* noop */ }
       deactivatePluginModulePack(plugin.id)
     }
-    const updatedResult = await setPluginLifecycleStatus(db, plugin.id, 'error', lifecycleErrorMessage(err))
+    const updatedResult = await setPluginLifecycleStatus(plugin.id, 'error', lifecycleErrorMessage(err))
     const updated = updatedResult?.kind === 'ok' ? updatedResult.plugin : null
     return { plugin: updated ?? plugin, ok: false }
   }

@@ -11,11 +11,9 @@
  *
  * Convex port: thin adapters over `convex/dataRows.ts`. Convex has no
  * `ON CONFLICT`, so each upsert is a read-by-index → patch-or-insert inside one
- * atomic mutation (§4.6). The signatures are frozen — the leading SQL
- * `DbClient` handle is retained (named `_db`, intentionally unused). The
- * created/updated timestamp defaults are computed here, exactly as before.
+ * atomic mutation (§4.6). The created/updated timestamp defaults are computed
+ * here, exactly as before.
  */
-import type { DbClient } from '../../../db/client'
 import type { DataRowCells, DataRowStatus } from '@core/data/schemas'
 import { api, getConvex } from '../../../convex/client'
 
@@ -48,7 +46,7 @@ function importArgs(input: DataRowImportInput) {
  * Upsert a row preserving its original id, status, and timestamps. Used by the
  * `merge-overwrite` and `replace` import strategies.
  */
-export async function upsertDataRow(_db: DbClient, input: DataRowImportInput): Promise<void> {
+export async function upsertDataRow(input: DataRowImportInput): Promise<void> {
   await getConvex().mutation(api.dataRows.importUpsert, importArgs(input))
 }
 
@@ -59,7 +57,6 @@ export async function upsertDataRow(_db: DbClient, input: DataRowImportInput): P
  * `merge-add` import strategy.
  */
 export async function insertDataRowIfAbsent(
-  _db: DbClient,
   input: DataRowImportInput,
 ): Promise<boolean> {
   return getConvex().mutation(api.dataRows.importInsertIfAbsent, importArgs(input))
@@ -69,6 +66,6 @@ export async function insertDataRowIfAbsent(
  * Plain insert with no conflict handling. Assumes the caller has already wiped
  * the table (as the `replace` strategy does).
  */
-export async function replaceDataRow(_db: DbClient, input: DataRowImportInput): Promise<void> {
+export async function replaceDataRow(input: DataRowImportInput): Promise<void> {
   await getConvex().mutation(api.dataRows.importReplace, importArgs(input))
 }

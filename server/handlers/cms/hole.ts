@@ -9,7 +9,7 @@
  * a single node subtree from the latest published snapshot AT REQUEST TIME and
  * returns it as HTML. The originating page URL (`u`) seeds the route frame so
  * `route.query.*` bindings resolve, drives per-loop pagination, and is fed to
- * request-dependent loop sources via `ctx.request`.
+ * request-dependent loop sources via the request frame.
  *
  * Two cache tiers (see `LoopEntitySource.requestDependent` / `perVisitor`):
  *   - SHARED hole — cached by Layer B keyed on `(nodeId, page-query, version)`.
@@ -34,7 +34,6 @@
  * module-JS channel's static hole-subtree walk.
  */
 
-import type { DbClient } from '../../db/client'
 import type { Page, PageNode, SiteDocument } from '@core/page-tree'
 import type { SourceRequestContext } from '@core/loops/types'
 import { registry } from '@core/module-engine'
@@ -65,10 +64,6 @@ export function serveHoleRuntimeAsset(): Response {
       'cache-control': 'public, max-age=3600',
     },
   })
-}
-
-interface HoleHandlerContext {
-  db: DbClient
 }
 
 // The versioned snapshot memo + nodeId → page index live in
@@ -120,12 +115,11 @@ async function renderHoleFragment(
   nodeId: string,
   page: Page,
   site: SiteDocument,
-  db: DbClient,
   pageUrl: URL,
   request: SourceRequestContext,
 ): Promise<string> {
   const route = buildRouteFrame(pageUrl.toString())
-  const loopData = await prefetchLoopData(page, site, db, pageUrl, {
+  const loopData = await prefetchLoopData(page, site, pageUrl, {
     request,
     rootNodeId: nodeId,
   })
@@ -163,7 +157,6 @@ async function renderHoleFragment(
 export async function handleHoleRequest(
   req: Request,
   url: URL,
-  ctx: HoleHandlerContext,
 ): Promise<Response> {
   if (req.method !== 'GET') {
     return new Response('Method not allowed', {
@@ -195,7 +188,7 @@ export async function handleHoleRequest(
   }
 
   // Load (memoised) snapshot for this version and find the node's page in O(1).
-  const snap = await getPublishedNodeIndexForVersion(ctx.db, currentVersion)
+  const snap = await getPublishedNodeIndexForVersion(currentVersion)
   if (!snap) {
     return new Response('Site not published', {
       status: 404,
@@ -224,7 +217,7 @@ export async function handleHoleRequest(
   const perVisitor = isPerVisitorHole(node)
   const route = buildRouteFrame(pageUrl.toString())
   // Parsed query params of the originating page request — handed to a
-  // request-dependent loop source's `fetch()` via `ctx.request.query`.
+  // request-dependent loop source's `fetch()` via the request frame's query.
   const query: Record<string, string> = Object.fromEntries(pageUrl.searchParams)
 
   // Per-visitor hole: bypass Layer B entirely, expose cookies, never cache.
@@ -235,7 +228,7 @@ export async function handleHoleRequest(
       slug: route.slug,
       cookies: parseCookies(req.headers.get('cookie')),
     }
-    const html = await renderHoleFragment(nodeId, foundPage, snap.site, ctx.db, pageUrl, request)
+    const html = await renderHoleFragment(nodeId, foundPage, snap.site, pageUrl, request)
     return new Response(html, {
       status: 200,
       headers: {
@@ -260,7 +253,7 @@ export async function handleHoleRequest(
       queryString: `v=${currentVersion}&${normalizeQuery(pageUrl.searchParams)}`,
     },
     async () => {
-      const html = await renderHoleFragment(nodeId, foundPage, snap.site, ctx.db, pageUrl, request)
+      const html = await renderHoleFragment(nodeId, foundPage, snap.site, pageUrl, request)
       return {
         body: html,
         headers: { 'content-type': 'text/html; charset=utf-8' },

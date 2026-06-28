@@ -22,7 +22,6 @@
  * swap) — that pre-warms the memo for the version visitors are about to hit.
  */
 
-import type { DbClient } from '../db/client'
 import type { Page, PageNode, SiteDocument } from '@core/page-tree'
 import type { PublishedPageSnapshot } from '../repositories/publish'
 import { getLatestPublishedSiteSnapshot } from '../repositories/publish'
@@ -40,10 +39,9 @@ const snapshotMemo = createVersionedSingleFlight<PublishedPageSnapshot>()
  * it from the DB once per publish version; warm calls do zero I/O.
  */
 export function getLatestSnapshotForVersion(
-  db: DbClient,
   version: number,
 ): Promise<PublishedPageSnapshot | null> {
-  return snapshotMemo.get(version, () => getLatestPublishedSiteSnapshot(db))
+  return snapshotMemo.get(version, () => getLatestPublishedSiteSnapshot())
 }
 
 // ---------------------------------------------------------------------------
@@ -63,11 +61,10 @@ const nodeIndexMemo = createVersionedSingleFlight<PublishedNodeIndex>()
  * endpoint locates a fragment's page in O(1) instead of scanning all pages.
  */
 export function getPublishedNodeIndexForVersion(
-  db: DbClient,
   version: number,
 ): Promise<PublishedNodeIndex | null> {
   return nodeIndexMemo.get(version, async () => {
-    const snapshot = await getLatestSnapshotForVersion(db, version)
+    const snapshot = await getLatestSnapshotForVersion(version)
     if (!snapshot) return null
     const nodeIndex = new Map<string, Page>()
     for (const page of snapshot.site.pages) {
@@ -97,11 +94,10 @@ const loopIndexMemo = createVersionedSingleFlight<PublishedLoopIndex>()
  * `collectLoopNodes` walk the loop endpoint used to repeat per request).
  */
 export function getPublishedLoopIndexForVersion(
-  db: DbClient,
   version: number,
 ): Promise<PublishedLoopIndex | null> {
   return loopIndexMemo.get(version, async () => {
-    const snapshot = await getLatestSnapshotForVersion(db, version)
+    const snapshot = await getLatestSnapshotForVersion(version)
     if (!snapshot) return null
     const loops = new Map<string, { page: Page; node: PageNode }>()
     for (const page of snapshot.site.pages) {

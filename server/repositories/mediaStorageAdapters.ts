@@ -15,7 +15,6 @@
  * `migrations-pg.ts:004_media_storage_adapters` for the column.
  */
 
-import type { DbClient } from '../db/client'
 import { isoDate } from '@core/utils/isoDate'
 import type { MediaAssetRole } from '@core/plugin-sdk'
 import { api, getConvex } from '../convex/client'
@@ -48,7 +47,6 @@ function mapRow(row: ElectedAdapterRow): ElectedAdapter {
  * when no row exists for the role — that's the post-fresh-install default.
  */
 export async function getElectedAdapterId(
-  _db: DbClient,
   role: MediaAssetRole,
 ): Promise<string> {
   return getConvex().query(api.mediaStorage.getElectedAdapterId, { role })
@@ -58,7 +56,7 @@ export async function getElectedAdapterId(
  * Snapshot every elected adapter (all roles, including unset ones which
  * resolve to `''`). Used by the admin UI to render the election picker.
  */
-export async function listElectedAdapters(_db: DbClient): Promise<ElectedAdapter[]> {
+export async function listElectedAdapters(): Promise<ElectedAdapter[]> {
   const rows = await getConvex().query(api.mediaStorage.listElectedAdapters, {})
   return rows.map(mapRow)
 }
@@ -68,11 +66,9 @@ export async function listElectedAdapters(_db: DbClient): Promise<ElectedAdapter
  * Idempotent: re-electing the same adapter for the same role refreshes
  * `elected_at` / `elected_by_user_id`.
  *
- * Cross-dialect upsert via `on conflict (role)` — works on both Postgres
- * and SQLite (the `db-postgres-isms.test.ts` gate confirms this is ANSI).
+ * Upsert keyed by `role`.
  */
 export async function electAdapter(
-  _db: DbClient,
   role: MediaAssetRole,
   adapterId: string,
   userId: string | null,
@@ -91,7 +87,6 @@ export async function electAdapter(
  * (b) block uninstalling a plugin whose adapter still has live rows.
  */
 export async function countAssetsForAdapter(
-  _db: DbClient,
   adapterId: string,
 ): Promise<number> {
   return getConvex().query(api.mediaStorage.countAssetsForAdapter, { adapterId })
@@ -163,9 +158,7 @@ function mapVariantDelegateRow(row: VariantDelegateRow): ElectedVariantDelegate 
  * Singleton — the row's PRIMARY KEY constraint guarantees at most one
  * delegate is active per host.
  */
-export async function getElectedVariantDelegate(
-  _db: DbClient,
-): Promise<ElectedVariantDelegate | null> {
+export async function getElectedVariantDelegate(): Promise<ElectedVariantDelegate | null> {
   const row = await getConvex().query(api.mediaStorage.getElectedVariantDelegate, {})
   return row ? mapVariantDelegateRow(row) : null
 }
@@ -177,7 +170,6 @@ export async function getElectedVariantDelegate(
  * sharp ladder.
  */
 export async function electVariantDelegate(
-  _db: DbClient,
   delegate: Omit<ElectedVariantDelegate, 'electedAt' | 'electedByUserId'>,
   userId: string | null,
 ): Promise<ElectedVariantDelegate> {
@@ -194,6 +186,6 @@ export async function electVariantDelegate(
 /**
  * Clear the elected delegate — host falls back to the local sharp ladder.
  */
-export async function clearVariantDelegate(_db: DbClient): Promise<void> {
+export async function clearVariantDelegate(): Promise<void> {
   await getConvex().mutation(api.mediaStorage.clearVariantDelegate, {})
 }

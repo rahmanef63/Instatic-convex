@@ -15,7 +15,6 @@
  * Both endpoints accept the draft site in the request body rather than
  * loading the persisted draft — preview must reflect unsaved edits.
  */
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import { resolveSiteDependencyLock } from '../../publish/runtime/dependencyResolver'
 import { ensureRuntimeDependencyCache } from '../../publish/runtime/dependencyCache'
@@ -82,11 +81,11 @@ function runtimeRequestPackageJson(raw: unknown): SitePackageJson {
   }
 }
 
-export async function handleRuntimeRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handleRuntimeRoutes(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
 
   if (url.pathname === '/admin/api/cms/runtime/dependencies/resolve') {
-    const user = await requireCapability(req, db, 'runtime.dependencies')
+    const user = await requireCapability(req, 'runtime.dependencies')
     if (user instanceof Response) return user
     if (req.method !== 'POST') return methodNotAllowed()
 
@@ -137,7 +136,7 @@ export async function handleRuntimeRoutes(req: Request, db: DbClient): Promise<R
     // (and therefore `site.read`) needs to use the preview iframe even
     // though they don't have `pages.edit`. See A4 in the capabilities
     // review.
-    const user = await requireCapability(req, db, 'site.read')
+    const user = await requireCapability(req, 'site.read')
     if (user instanceof Response) return user
     if (req.method !== 'POST') return methodNotAllowed()
 
@@ -191,7 +190,6 @@ export async function handleRuntimeRoutes(req: Request, db: DbClient): Promise<R
         dependencyCache,
         breakpointId,
         templateContext,
-        db,
       })
 
       return jsonResponse({

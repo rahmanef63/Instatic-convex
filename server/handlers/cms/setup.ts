@@ -16,7 +16,6 @@
  * so it adds no new information leak.
  */
 import { nanoid } from 'nanoid'
-import type { DbClient } from '../../db/client'
 import { hashPassword } from '../../auth/tokens'
 import { getSetupStatus } from '../../repositories/setup'
 import { api, getConvex } from '../../convex/client'
@@ -27,22 +26,22 @@ import { badRequest, jsonResponse, methodNotAllowed, readValidatedBody } from '.
 import { Type, safeParseValue } from '@core/utils/typeboxHelpers'
 import { CMS_API_PREFIX, requestAuditContext } from './shared'
 
-export async function handleSetupRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handleSetupRoutes(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
 
   if (url.pathname === `${CMS_API_PREFIX}/setup/status`) {
     if (req.method !== 'GET') return methodNotAllowed()
-    return jsonResponse(await getSetupStatus(db))
+    return jsonResponse(await getSetupStatus())
   }
 
   if (url.pathname === `${CMS_API_PREFIX}/public-site`) {
     if (req.method !== 'GET') return methodNotAllowed()
-    return jsonResponse(await loadPublicSiteIdentity(db))
+    return jsonResponse(await loadPublicSiteIdentity())
   }
 
   if (url.pathname === `${CMS_API_PREFIX}/setup`) {
     if (req.method !== 'POST') return methodNotAllowed()
-    const status = await getSetupStatus(db)
+    const status = await getSetupStatus()
     if (!status.needsSetup) {
       return jsonResponse({ error: 'Setup already complete' }, { status: 409 })
     }
@@ -148,7 +147,7 @@ const StoredSiteIdentitySchema = Type.Object({
  * page tree, no plugin list, no user info — so this stays safe to serve
  * without auth.
  */
-async function loadPublicSiteIdentity(_db: DbClient): Promise<PublicSiteIdentity> {
+async function loadPublicSiteIdentity(): Promise<PublicSiteIdentity> {
   const row = await getConvex().query(api.setupTx.publicSiteRow, {})
   if (!row) return { name: null, faviconUrl: null }
 

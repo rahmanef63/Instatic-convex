@@ -15,7 +15,6 @@
  * history, and the plugin's whole on-disk tree, then re-activates the
  * surviving plugins so they pick their hooks back up.
  */
-import type { DbClient } from '../../../db/client'
 import type { AuthUser } from '../../../repositories/users'
 import {
   deletePlugin,
@@ -54,13 +53,12 @@ import type { InstalledPlugin } from '@core/plugin-sdk'
  */
 async function setPluginEnabledFromRequest(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
   user: AuthUser,
   pluginId: string,
   enabled: boolean,
 ): Promise<Response> {
-  const updatedResult = await setPluginEnabled(db, pluginId, enabled)
+  const updatedResult = await setPluginEnabled(pluginId, enabled)
   if (!updatedResult) return pluginNotFound()
   // This shouldn't happen (we already rejected broken plugins before calling
   // this helper), but guard defensively in case a concurrent mutation raced.
@@ -74,7 +72,6 @@ async function setPluginEnabledFromRequest(
 
   await unloadPlugin(pluginId)
   const lifecycle = await runPluginLifecycleHook(
-    db,
     updated,
     options,
     enabled ? 'activate' : 'deactivate',
@@ -85,7 +82,7 @@ async function setPluginEnabledFromRequest(
   // installed surface registered — re-activate the others so they pick up
   // their hooks again.
   if (!enabled) {
-    await activateInstalledServerPlugins(db, options.uploadsDir)
+    await activateInstalledServerPlugins(options.uploadsDir)
   }
 
   broadcastPluginEvent({
@@ -94,18 +91,16 @@ async function setPluginEnabledFromRequest(
     occurredAt: new Date().toISOString(),
   })
   await recordPluginAuditEvent(
-    db,
     user,
     req,
     enabled ? 'plugin.enable' : 'plugin.disable',
     pluginId,
   )
-  return jsonResponse({ plugin: await presentPluginSecrets(db, lifecycle.plugin), ...(await pluginsPayload(db)) })
+  return jsonResponse({ plugin: await presentPluginSecrets(lifecycle.plugin), ...(await pluginsPayload()) })
 }
 
 export async function handlePluginItem(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
   user: AuthUser,
   pluginId: string,
@@ -115,7 +110,7 @@ export async function handlePluginItem(
     const body = await readValidatedBody(req, PluginEnabledBodySchema)
     if (!body) return badRequest('Plugin enabled must be a boolean')
 
-    const lookup = await getInstalledPlugin(db, pluginId)
+    const lookup = await getInstalledPlugin(pluginId)
     if (!lookup) return pluginNotFound()
     if (lookup.kind === 'broken') {
       return jsonResponse(
@@ -124,12 +119,12 @@ export async function handlePluginItem(
       )
     }
 
-    return setPluginEnabledFromRequest(req, db, options, user, pluginId, body.enabled)
+    return setPluginEnabledFromRequest(req, options, user, pluginId, body.enabled)
   }
 
   if (req.method === 'DELETE') {
     const force = new URL(req.url).searchParams.get('force') === 'true'
-    const lookup = await getInstalledPlugin(db, pluginId)
+    const lookup = await getInstalledPlugin(pluginId)
     if (!lookup) return pluginNotFound()
 
     // Lifecycle hooks run only on the normal path with a parseable manifest:
@@ -142,15 +137,15 @@ export async function handlePluginItem(
       // deactivate first so the plugin tears down its active-state
       // resources before the uninstall hook does its permanent cleanup.
       if (current.lifecycleStatus === 'active') {
-        const deactivated = await runPluginLifecycleHook(db, current, options, 'deactivate', 'disabled')
+        const deactivated = await runPluginLifecycleHook(current, options, 'deactivate', 'disabled')
         if (!deactivated.ok) return uninstallHookFailure('deactivate', deactivated.plugin)
         current = deactivated.plugin
       }
-      const uninstalled = await runPluginLifecycleHook(db, current, options, 'uninstall', current.lifecycleStatus)
+      const uninstalled = await runPluginLifecycleHook(current, options, 'uninstall', current.lifecycleStatus)
       if (!uninstalled.ok) return uninstallHookFailure('uninstall', uninstalled.plugin)
     }
 
-    return removePluginCompletely(req, db, options, user, pluginId, force)
+    return removePluginCompletely(req, options, user, pluginId, force)
   }
 
   return methodNotAllowed()
@@ -183,13 +178,12 @@ function uninstallHookFailure(
  */
 async function removePluginCompletely(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
   user: AuthUser,
   pluginId: string,
   forced: boolean,
 ): Promise<Response> {
-  const deleted = await deletePlugin(db, pluginId)
+  const deleted = await deletePlugin(pluginId)
   if (!deleted) return pluginNotFound()
   // Idempotent on the normal path (the uninstall hook runner already
   // unloaded the worker and deactivated the module pack) — required on the
@@ -197,14 +191,13 @@ async function removePluginCompletely(
   await unloadPlugin(pluginId)
   deactivatePluginModulePack(pluginId)
   clearPluginCrashCounter(pluginId)
-  await clearPluginCrashes(db, pluginId)
-  await clearPluginScheduleRuns(db, pluginId)
+  await clearPluginCrashes(pluginId)
+  await clearPluginScheduleRuns(pluginId)
   if (options.uploadsDir) {
     await removeAllPluginAssets(options.uploadsDir, pluginId)
   }
-  await activateInstalledServerPlugins(db, options.uploadsDir)
+  await activateInstalledServerPlugins(options.uploadsDir)
   await recordPluginAuditEvent(
-    db,
     user,
     req,
     'plugin.delete',
@@ -234,13 +227,12 @@ async function removePluginCompletely(
  */
 export async function handlePluginRestart(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
   user: AuthUser,
   pluginId: string,
 ): Promise<Response> {
   if (req.method !== 'POST') return methodNotAllowed()
-  const lookup = await getInstalledPlugin(db, pluginId)
+  const lookup = await getInstalledPlugin(pluginId)
   if (!lookup) return pluginNotFound()
   if (lookup.kind === 'broken') {
     return jsonResponse(
@@ -255,27 +247,27 @@ export async function handlePluginRestart(
   // fresh after the operator's intervention. Keeping old events around after
   // an explicit restart would muddy the "did the restart work?" signal.
   clearPluginCrashCounter(pluginId)
-  await clearPluginCrashes(db, pluginId)
+  await clearPluginCrashes(pluginId)
 
   // Fully unload first so the existing (possibly half-dead) worker is
   // terminated. Then reload + activate.
   await unloadPlugin(pluginId)
   try {
-    await reloadAndActivatePlugin(db, pluginId, options.uploadsDir)
-    await setPluginLifecycleStatus(db, pluginId, 'active')
+    await reloadAndActivatePlugin(pluginId, options.uploadsDir)
+    await setPluginLifecycleStatus(pluginId, 'active')
   } catch (err) {
     const message = lifecycleErrorMessage(err)
-    await setPluginLifecycleStatus(db, pluginId, 'error', message)
+    await setPluginLifecycleStatus(pluginId, 'error', message)
     return badRequest(`Restart failed: ${message}`)
   }
 
-  await recordPluginAuditEvent(db, user, req, 'plugin.enable', pluginId, { restart: true })
+  await recordPluginAuditEvent(user, req, 'plugin.enable', pluginId, { restart: true })
   broadcastPluginEvent({
     kind: 'restarted',
     pluginId,
     occurredAt: new Date().toISOString(),
   })
-  const finalResult = await getInstalledPlugin(db, pluginId)
+  const finalResult = await getInstalledPlugin(pluginId)
   const finalRow = (finalResult?.kind === 'ok' ? finalResult.plugin : null) ?? plugin
-  return jsonResponse({ plugin: await presentPluginSecrets(db, finalRow), ...(await pluginsPayload(db)) })
+  return jsonResponse({ plugin: await presentPluginSecrets(finalRow), ...(await pluginsPayload()) })
 }

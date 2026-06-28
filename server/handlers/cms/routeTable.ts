@@ -22,12 +22,11 @@
  * value once via `decodeURIComponent` and hands the handler a `RouteParams`
  * map. String patterns match the pathname exactly and carry no params.
  *
- * The handler signature is `(req, db, params, ...extra)`. `extra` is whatever
+ * The handler signature is `(req, params, ...extra)`. `extra` is whatever
  * per-request context a group threads through (e.g. `CmsHandlerOptions`, or a
  * pre-gated `AuthUser`) — the dispatcher forwards it verbatim, so a group that
  * needs no extra context simply omits it.
  */
-import type { DbClient } from '../../db/client'
 import { methodNotAllowed } from '../../http'
 
 export type RouteParams = Record<string, string>
@@ -36,7 +35,6 @@ type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 type RouteHandler<Extra extends unknown[]> = (
   req: Request,
-  db: DbClient,
   params: RouteParams,
   ...extra: Extra
 ) => Promise<Response>
@@ -78,7 +76,6 @@ function matchPattern(pathname: string, pattern: string | RegExp): RouteParams |
  */
 export async function runRouteTable<Extra extends unknown[]>(
   req: Request,
-  db: DbClient,
   routes: readonly Route<Extra>[],
   ...extra: Extra
 ): Promise<Response | null> {
@@ -89,7 +86,7 @@ export async function runRouteTable<Extra extends unknown[]>(
     if (params === null) continue
     pathMatched = true
     if (req.method !== route.method) continue
-    return route.handler(req, db, params, ...extra)
+    return route.handler(req, params, ...extra)
   }
   return pathMatched ? methodNotAllowed() : null
 }

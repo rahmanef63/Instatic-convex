@@ -2,11 +2,7 @@
  * Published runtime-asset repository.
  *
  * Convex port: the read/write bodies are now thin adapters over `convex/media.ts`
- * (`saveRuntimeAssets` / `getRuntimeAsset`, docs/CONVEX-MIGRATION.md §2). The
- * exported signatures are frozen — the leading SQL `DbClient` handle is retained
- * (named `_db`, intentionally unused) so callers keep invoking these unchanged
- * while the rest of the runtime is still on the SQL path; it is dropped wholesale
- * when `server/db/*` is retired (§7).
+ * (`saveRuntimeAssets` / `getRuntimeAsset`, docs/CONVEX-MIGRATION.md §2).
  *
  * `published_runtime_assets.content_bytes` is true binary (`v.bytes()` per the
  * schema, §6): the Bun side passes a tightly-packed `ArrayBuffer` on write and
@@ -17,7 +13,6 @@
  */
 import { nanoid } from 'nanoid'
 import type { BuiltRuntimeAssetFile } from '../publish/runtime/bundleScripts'
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 
 interface PublishedRuntimeAssetRecord {
@@ -32,7 +27,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 export async function savePublishedRuntimeAssets(
-  _db: DbClient,
   dataRowVersionId: string,
   files: BuiltRuntimeAssetFile[],
 ): Promise<void> {
@@ -49,7 +43,6 @@ export async function savePublishedRuntimeAssets(
 }
 
 export async function getPublishedRuntimeAsset(
-  _db: DbClient,
   publicPath: string,
 ): Promise<PublishedRuntimeAssetRecord | null> {
   const row = await getConvex().query(api.media.getRuntimeAsset, { publicPath })

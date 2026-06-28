@@ -20,7 +20,6 @@
  * bodies; the runtime's "Try again" UX surfaces network failures.
  */
 
-import type { DbClient } from '../../db/client'
 import { registry } from '@core/module-engine'
 import { loopSourceRegistry } from '@core/loops/registry'
 import {
@@ -53,14 +52,9 @@ export function serveLoopRuntimeAsset(): Response {
   })
 }
 
-interface LoopHandlerContext {
-  db: DbClient
-}
-
 export async function handleLoopRequest(
   req: Request,
   url: URL,
-  ctx: LoopHandlerContext,
 ): Promise<Response> {
   if (req.method !== 'GET') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
@@ -78,7 +72,7 @@ export async function handleLoopRequest(
   // the same site document, so the index covers regular pages and template
   // pages alike (the runtime's `pagePath` hint is no longer needed) — and the
   // old per-request full-snapshot parse + all-pages tree walk is gone.
-  const loopIndex = await getPublishedLoopIndexForVersion(ctx.db, getPublishVersion())
+  const loopIndex = await getPublishedLoopIndexForVersion(getPublishVersion())
   if (!loopIndex) {
     return jsonResponse({ error: 'Site not published' }, { status: 404 })
   }
@@ -103,7 +97,6 @@ export async function handleLoopRequest(
   let result
   try {
     result = await source.fetch({
-      db: ctx.db,
       site,
       filters: props.filters,
       orderBy: props.orderBy || (source.orderByOptions[0]?.id ?? ''),

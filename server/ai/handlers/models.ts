@@ -9,7 +9,6 @@
 
 import { jsonResponse } from '../../http'
 import { requireCapability } from '../../auth/authz'
-import type { DbClient } from '../../db/client'
 import { resolveDriver } from '../drivers'
 import {
   readCredentialForUser,
@@ -23,25 +22,23 @@ const VALID_PROVIDERS: AiProviderId[] = ['anthropic', 'openai', 'ollama', 'openr
 
 export function tryHandleAiModels(
   req: Request,
-  db: DbClient,
   url: URL,
   pathname: string,
 ): Promise<Response> | null {
   const match = pathname.match(/^\/admin\/api\/ai\/providers\/([^/]+)\/models$/)
   if (!match) return null
-  return handleModels(req, db, url, match[1]!)
+  return handleModels(req, url, match[1]!)
 }
 
 async function handleModels(
   req: Request,
-  db: DbClient,
   url: URL,
   providerParam: string,
 ): Promise<Response> {
   if (req.method !== 'GET') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
-  const userOrResponse = await requireCapability(req, db, 'ai.chat')
+  const userOrResponse = await requireCapability(req, 'ai.chat')
   if (userOrResponse instanceof Response) return userOrResponse
 
   if (!VALID_PROVIDERS.includes(providerParam as AiProviderId)) {
@@ -61,7 +58,7 @@ async function handleModels(
   const credentialId = url.searchParams.get('credentialId')
   let resolved
   if (credentialId) {
-    const record = await readCredentialForUser(db, userOrResponse.id, credentialId)
+    const record = await readCredentialForUser(userOrResponse.id, credentialId)
     if (!record) {
       return jsonResponse({ error: 'Credential not found' }, { status: 404 })
     }
@@ -88,16 +85,15 @@ async function handleModels(
   // and Ollama is free/self-hosted, so neither is enriched here.
   const enriched =
     providerId === 'anthropic' || providerId === 'openai'
-      ? await enrichFromCatalogue(db, models)
+      ? await enrichFromCatalogue(models)
       : models
   return jsonResponse({ models: enriched })
 }
 
 async function enrichFromCatalogue(
-  db: DbClient,
   models: AiProviderModel[],
 ): Promise<AiProviderModel[]> {
-  const catalogue = await getModelCatalogue(db)
+  const catalogue = await getModelCatalogue()
   if (catalogue.size === 0) return models
   return models.map((model) => {
     const entry = catalogue.get(pricingKey(model.id))

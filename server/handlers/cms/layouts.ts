@@ -28,7 +28,6 @@
  * second validation layer on the server. The adapter validates via
  * validateSavedLayouts immediately after conversion.
  */
-import type { DbClient } from '../../db/client'
 import { requireAnyCapability, requireCapability } from '../../auth/authz'
 import type { CoreCapability } from '../../auth/capabilities'
 import { listDataRows, reconcileDataRowRoster } from '../../repositories/data'
@@ -47,20 +46,20 @@ const LAYOUT_WRITE_CAPABILITIES = [
   'site.style.edit',
 ] satisfies CoreCapability[]
 
-export async function handleLayoutsRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handleLayoutsRoutes(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== `${CMS_API_PREFIX}/layouts`) return null
 
   if (req.method === 'GET') {
-    const user = await requireCapability(req, db, 'site.read')
+    const user = await requireCapability(req, 'site.read')
     if (user instanceof Response) return user
 
-    const rows = await listDataRows(db, 'layouts')
+    const rows = await listDataRows('layouts')
     return jsonResponse({ rows })
   }
 
   if (req.method === 'PUT') {
-    const user = await requireAnyCapability(req, db, LAYOUT_WRITE_CAPABILITIES)
+    const user = await requireAnyCapability(req, LAYOUT_WRITE_CAPABILITIES)
     if (user instanceof Response) return user
 
     const LayoutsBodySchema = Type.Object({
@@ -79,7 +78,7 @@ export async function handleLayoutsRoutes(req: Request, db: DbClient): Promise<R
     // the changed batch over the stored roster. This runs OUTSIDE the
     // transaction (sanitization is CPU work; the SQLite adapter serializes
     // every transaction through one chain).
-    const existingRows = await listDataRows(db, 'layouts')
+    const existingRows = await listDataRows('layouts')
     const existingLayouts = existingRows.flatMap((r) => {
       const layout = savedLayoutFromRow(r)
       return layout ? [layout] : []
@@ -117,7 +116,7 @@ export async function handleLayoutsRoutes(req: Request, db: DbClient): Promise<R
 
     // Batch reconcile: soft-delete / create / update in one short transaction
     // (reap-first + two-phase slug writes — see rows/reconcile.ts).
-    await reconcileDataRowRoster(db, {
+    await reconcileDataRowRoster({
       tableId: 'layouts',
       writes: layouts.map((layout) => ({
         id: layout.id,

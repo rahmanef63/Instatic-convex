@@ -13,17 +13,15 @@
 import { pluginScheduleFullId, registerPluginSchedule } from '../../pluginScheduleRegistration'
 import { disablePluginSchedule } from '../../../repositories/pluginSchedules'
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiOk } from '../apiReplies'
 import type { HostPluginRecord } from '../types'
 
 export async function handleScheduleRegister(
   msg: ApiCallFor<'cms.schedule.register'>,
   _entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [arg] = msg.args
-  await registerPluginSchedule(db, {
+  await registerPluginSchedule({
     pluginId: msg.pluginId,
     scheduleId: arg.scheduleId,
     cadence: arg.cadence,
@@ -36,11 +34,10 @@ export async function handleScheduleRegister(
 export async function handleScheduleCancel(
   msg: ApiCallFor<'cms.schedule.cancel'>,
   _entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [{ scheduleId }] = msg.args
   // Registration stored the row under the namespaced id — cancel must
   // target the same key or it matches nothing.
-  await disablePluginSchedule(db, msg.pluginId, pluginScheduleFullId(msg.pluginId, scheduleId))
+  await disablePluginSchedule(msg.pluginId, pluginScheduleFullId(msg.pluginId, scheduleId))
   replyApiOk(msg.pluginId, msg.correlationId)
 }

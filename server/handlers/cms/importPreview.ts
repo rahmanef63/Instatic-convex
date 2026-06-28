@@ -17,7 +17,6 @@
  * Requires `data.export` capability (paired with the actual export
  * endpoint — preview is the read-only dry-run that precedes import).
  */
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import { listDataRows } from '../../repositories/data/rows'
 import { listDataTables } from '../../repositories/data/tables'
@@ -34,13 +33,12 @@ import { CMS_API_PREFIX } from './shared'
 
 export async function handleImportPreviewRoute(
   req: Request,
-  db: DbClient,
 ): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== `${CMS_API_PREFIX}/import/preview`) return null
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 
-  const user = await requireCapability(req, db, 'data.export')
+  const user = await requireCapability(req, 'data.export')
   if (user instanceof Response) return user
 
   const bundle = await readValidatedBody(req, SiteBundleSchema)
@@ -49,7 +47,7 @@ export async function handleImportPreviewRoute(
   }
 
   // Fetch current local tables to know which ones exist
-  const localTables = await listDataTables(db)
+  const localTables = await listDataTables()
   const localTableIds = new Set(localTables.map((t) => t.id))
 
   const rowConflicts: BundleRowConflict[] = []
@@ -65,7 +63,7 @@ export async function handleImportPreviewRoute(
       // Local rows for this table (0 if the table doesn't exist locally yet)
       let localRows: DataRow[]
       if (localTableIds.has(table.id)) {
-        localRows = await listDataRows(db, table.id)
+        localRows = await listDataRows(table.id)
       } else {
         localRows = []
       }

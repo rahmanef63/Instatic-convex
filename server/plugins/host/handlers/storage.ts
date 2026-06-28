@@ -19,29 +19,26 @@ import {
   updatePluginRecord,
 } from '../../../repositories/plugins'
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiOk } from '../apiReplies'
 import type { HostPluginRecord } from '../types'
 
 export async function handleStorageList(
   msg: ApiCallFor<'cms.storage.list'>,
   _entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [resourceId, options] = msg.args
-  const result = await listPluginRecords(db, msg.pluginId, resourceId, options)
+  const result = await listPluginRecords(msg.pluginId, resourceId, options)
   replyApiOk(msg.pluginId, msg.correlationId, result as unknown)
 }
 
 export async function handleStorageCreate(
   msg: ApiCallFor<'cms.storage.create'>,
   entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [resourceId, data] = msg.args
   const resource = findPluginResource(entry.manifest, resourceId)
   const cleanedData = resource ? validatePluginRecordData(resource, data) : data
-  const created: PluginRecord = await createPluginRecord(db, {
+  const created: PluginRecord = await createPluginRecord({
     id: nanoid(),
     pluginId: msg.pluginId,
     resourceId,
@@ -53,12 +50,11 @@ export async function handleStorageCreate(
 export async function handleStorageUpdate(
   msg: ApiCallFor<'cms.storage.update'>,
   entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [resourceId, recordId, data] = msg.args
   const resource = findPluginResource(entry.manifest, resourceId)
   const cleanedData = resource ? validatePluginRecordData(resource, data) : data
-  const updated = await updatePluginRecord(db, {
+  const updated = await updatePluginRecord({
     id: recordId,
     pluginId: msg.pluginId,
     resourceId,
@@ -70,10 +66,9 @@ export async function handleStorageUpdate(
 export async function handleStorageDelete(
   msg: ApiCallFor<'cms.storage.delete'>,
   _entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [resourceId, recordId] = msg.args
-  const ok = await deletePluginRecord(db, {
+  const ok = await deletePluginRecord({
     id: recordId,
     pluginId: msg.pluginId,
     resourceId,

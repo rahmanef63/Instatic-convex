@@ -14,7 +14,6 @@
  * the `/admin/api/cms/pages` endpoint so they can be reconciled atomically
  * without the shell round-trip.
  */
-import type { DbClient } from '../../db/client'
 import { requireAnyCapability, requireCapability } from '../../auth/authz'
 import type { CoreCapability } from '../../auth/capabilities'
 import { getDraftSite, saveDraftSite } from '../../repositories/site'
@@ -37,17 +36,17 @@ const SITE_WRITE_CAPABILITIES = [
   'site.style.edit',
 ] satisfies CoreCapability[]
 
-export async function handleSiteRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handleSiteRoutes(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== '/admin/api/cms/site') return null
 
   const user = req.method === 'GET'
-    ? await requireCapability(req, db, 'site.read')
-    : await requireAnyCapability(req, db, SITE_WRITE_CAPABILITIES)
+    ? await requireCapability(req, 'site.read')
+    : await requireAnyCapability(req, SITE_WRITE_CAPABILITIES)
   if (user instanceof Response) return user
 
   if (req.method === 'GET') {
-    const shell = await getDraftSite(db)
+    const shell = await getDraftSite()
     if (!shell) return jsonResponse({ error: 'draft site not found' }, { status: 404 })
     return jsonResponse({ site: shell })
   }
@@ -61,7 +60,7 @@ export async function handleSiteRoutes(req: Request, db: DbClient): Promise<Resp
       // Granular diff gate: walk the changes between the saved draft shell and
       // the incoming one, and reject if any change category isn't covered by
       // the caller's capabilities.
-      const previousShell = await getDraftSite(db)
+      const previousShell = await getDraftSite()
       try {
         validateSiteWriteDiff(previousShell, nextShell, user.capabilities)
       } catch (err) {
@@ -73,7 +72,7 @@ export async function handleSiteRoutes(req: Request, db: DbClient): Promise<Resp
         }
         throw err
       }
-      await saveDraftSite(db, nextShell, user.id)
+      await saveDraftSite(nextShell, user.id)
       return jsonResponse({ ok: true })
     } catch (err) {
       if (err instanceof SiteValidationError) return badRequest(err.message)

@@ -15,7 +15,7 @@
  * is irrelevant beyond being parseable.
  */
 
-import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 import { getPublishedPageSnapshotById } from '../repositories/publish'
 import { renderPublishedSnapshot } from './publicRenderer'
 import { applyPublishedHtmlPipeline } from './publishedHtmlPipeline'
@@ -47,11 +47,10 @@ class PageNotPublishedError extends Error {
  * Throws `PageNotPublishedError` if the page is not found or is not
  * currently published.
  */
-async function republishSinglePage(db: DbClient, pageId: string): Promise<void> {
-  // Typed read through the publish repository — the snapshot column is parsed
-  // by the DbClient (`*_json` auto-parse) and typed as `PublishedPageSnapshot`,
-  // so there is no boundary cast here.
-  const snapshot = await getPublishedPageSnapshotById(db, pageId)
+async function republishSinglePage(pageId: string): Promise<void> {
+  // Typed read through the publish repository — the snapshot is hydrated and
+  // typed as `PublishedPageSnapshot`, so there is no boundary cast here.
+  const snapshot = await getPublishedPageSnapshotById(pageId)
   if (!snapshot) {
     throw new PageNotPublishedError(pageId)
   }
@@ -65,8 +64,8 @@ async function republishSinglePage(db: DbClient, pageId: string): Promise<void> 
   // publish.html filter → publish.after). The returned HTML is discarded —
   // the side-effects are what the caller actually needs (lets plugins
   // catch up on pages published before they were activated).
-  const rendered = await renderPublishedSnapshot(snapshot, { db, url: syntheticUrl })
-  await applyPublishedHtmlPipeline(rendered, db)
+  const rendered = await renderPublishedSnapshot(snapshot, { url: syntheticUrl })
+  await applyPublishedHtmlPipeline(rendered)
 }
 
 /**
@@ -76,22 +75,15 @@ async function republishSinglePage(db: DbClient, pageId: string): Promise<void> 
  * Errors for individual pages are logged and do not abort the batch — the
  * count reflects pages that completed without error.
  */
-export async function republishAllPages(db: DbClient): Promise<number> {
-  const { rows } = await db<{ id: string }>`
-    select id
-    from data_rows
-    where table_id = 'pages'
-      and status = 'published'
-      and deleted_at is null
-    order by created_at asc
-  `
-  const results = await Promise.allSettled(rows.map(row => republishSinglePage(db, row.id)))
+export async function republishAllPages(): Promise<number> {
+  const pages = await getConvex().query(api.dataPublish.listPublishedPageStatus, {})
+  const results = await Promise.allSettled(pages.map(page => republishSinglePage(page.rowId)))
   let count = 0
   for (const [i, result] of results.entries()) {
     if (result.status === 'fulfilled') {
       count++
     } else {
-      console.error(`[publish:republish] republishSinglePage("${rows[i].id}") threw:`, result.reason)
+      console.error(`[publish:republish] republishSinglePage("${pages[i].rowId}") threw:`, result.reason)
     }
   }
   return count

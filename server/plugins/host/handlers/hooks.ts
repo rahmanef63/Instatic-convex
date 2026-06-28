@@ -9,7 +9,6 @@
 
 import { canonicalPluginEventName, hookBus } from '@core/plugins/hookBus'
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiOk } from '../apiReplies'
 import { runHookListenerInWorker, runHookFilterInWorker } from '../rpc'
 import type { HostPluginRecord } from '../types'
@@ -17,7 +16,6 @@ import type { HostPluginRecord } from '../types'
 export async function handleHooksOn(
   msg: ApiCallFor<'cms.hooks.on'>,
   entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ event, listenerId }] = msg.args
   entry.hookListeners.push({ pluginId: msg.pluginId, listenerId })
@@ -31,7 +29,6 @@ export async function handleHooksOn(
 export async function handleHooksFilter(
   msg: ApiCallFor<'cms.hooks.filter'>,
   entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ name, filterId }] = msg.args
   entry.hookFilters.push({ pluginId: msg.pluginId, filterId })
@@ -44,7 +41,6 @@ export async function handleHooksFilter(
 export async function handleHooksEmit(
   msg: ApiCallFor<'cms.hooks.emit'>,
   _entry: HostPluginRecord,
-  _db: DbClient,
 ): Promise<void> {
   const [{ event, payload }] = msg.args
   // SECURITY: plugin emits are force-namespaced to `plugin.<id>.<name>` so a

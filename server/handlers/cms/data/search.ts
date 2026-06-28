@@ -13,7 +13,6 @@
  * per-table list endpoint enforces. Without this, a slug fragment typed in
  * the spotlight palette would leak other authors' row metadata.
  */
-import type { DbClient } from '../../../db/client'
 import { searchDataRows } from '../../../repositories/data'
 import { jsonResponse, methodNotAllowed } from '../../../http'
 import { CMS_API_PREFIX } from '../shared'
@@ -25,14 +24,13 @@ const MAX_LIMIT = 100
 
 export async function handleDataSearchRoute(
   req: Request,
-  db: DbClient,
 ): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== SEARCH_PATH) return null
 
   if (req.method !== 'GET') return methodNotAllowed()
 
-  const user = await requireDataAccess(req, db)
+  const user = await requireDataAccess(req)
   if (user instanceof Response) return user
 
   const rawQuery = url.searchParams.get('query')?.trim() ?? ''
@@ -45,6 +43,6 @@ export async function handleDataSearchRoute(
   )
 
   const visibility = canSeeAllDataRows(user) ? {} : { ownerUserId: user.id }
-  const entries = await searchDataRows(db, rawQuery, limit, visibility)
+  const entries = await searchDataRows(rawQuery, limit, visibility)
   return jsonResponse({ entries })
 }

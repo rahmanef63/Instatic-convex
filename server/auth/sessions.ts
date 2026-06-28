@@ -1,4 +1,3 @@
-import type { DbClient } from '../db/client'
 import { rowToUser, type AuthUser, type JoinedUserRow } from '../repositories/users'
 import { api, getConvex } from '../convex/client'
 import { deriveDeviceLabel } from './deviceLabel'
@@ -90,7 +89,6 @@ async function resolveSessionUser(
 }
 
 export async function createSession(
-  _db: DbClient,
   input: {
     idHash: string
     userId: string
@@ -128,7 +126,6 @@ export async function createSession(
 }
 
 export async function findUserBySessionHash(
-  _db: DbClient,
   idHash: string,
   now = Date.now(),
 ): Promise<AuthUser | null> {
@@ -156,14 +153,13 @@ async function touchSessionLastSeen(idHash: string, now: number): Promise<void> 
   await getConvex().mutation(api.sessions.touchLastSeen, { idHash })
 }
 
-export async function sessionRequiresMfa(_db: DbClient, idHash: string): Promise<boolean> {
+export async function sessionRequiresMfa(idHash: string): Promise<boolean> {
   const resolved = await resolveSessionUser(idHash, Date.now())
   if (!resolved) return false
   return resolved.user.mfaEnabled && resolved.sessionMfaPassedAt == null
 }
 
 export async function findUserByPendingMfaSessionHash(
-  _db: DbClient,
   idHash: string,
 ): Promise<AuthUser | null> {
   const resolved = await resolveSessionUser(idHash, Date.now())
@@ -173,7 +169,7 @@ export async function findUserByPendingMfaSessionHash(
   return user
 }
 
-export async function revokeSessionByHash(_db: DbClient, idHash: string): Promise<void> {
+export async function revokeSessionByHash(idHash: string): Promise<void> {
   await getConvex().mutation(api.sessions.revokeByHash, { idHash })
 }
 
@@ -186,7 +182,6 @@ export async function revokeSessionByHash(_db: DbClient, idHash: string): Promis
  * never had a step-up grant. Callers must treat null as "needs step-up".
  */
 export async function getSessionStepUpExpiresAt(
-  _db: DbClient,
   idHash: string,
 ): Promise<Date | null> {
   const value = await getConvex().query(api.sessions.getStepUpExpiresAt, { idHash })
@@ -194,7 +189,6 @@ export async function getSessionStepUpExpiresAt(
 }
 
 export async function rotateSessionToken(
-  _db: DbClient,
   currentIdHash: string,
   input: {
     nextIdHash: string
@@ -225,7 +219,6 @@ export async function rotateSessionToken(
 }
 
 export async function markSessionMfaPassed(
-  _db: DbClient,
   idHash: string,
   passedAt: Date = new Date(),
 ): Promise<void> {

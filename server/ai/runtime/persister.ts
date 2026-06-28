@@ -3,11 +3,10 @@
  * tool results, and usage totals to the conversation as a chat unfolds.
  *
  * Wraps `server/ai/conversations/store.ts` with the per-conversation
- * context (db client + conversation id) so the runner doesn't need to
- * thread those through every call.
+ * context (conversation id) so the runner doesn't need to thread that
+ * through every call.
  */
 
-import type { DbClient } from '../../db/client'
 import { api, getConvex } from '../../convex/client'
 import { appendMessage } from '../conversations/store'
 import { resolveCostUsd } from '../pricing'
@@ -54,7 +53,6 @@ interface ConversationsPersisterContext {
 }
 
 export function createConversationsPersister(
-  db: DbClient,
   conversationId: string,
   ctx: ConversationsPersisterContext,
 ): ConversationsPersister {
@@ -72,7 +70,7 @@ export function createConversationsPersister(
   return {
     async appendAssistantText(text) {
       const blocks: AiContentBlock[] = [{ kind: 'text', text }]
-      const row = await appendMessage(db, conversationId, {
+      const row = await appendMessage(conversationId, {
         role: 'assistant',
         content: blocks,
       })
@@ -86,7 +84,7 @@ export function createConversationsPersister(
         toolName,
         input,
       }]
-      const row = await appendMessage(db, conversationId, {
+      const row = await appendMessage(conversationId, {
         role: 'assistant',
         content: blocks,
         toolCallId,
@@ -110,7 +108,7 @@ export function createConversationsPersister(
           ? { kind: 'toolResult', ok: true }
           : { kind: 'toolResult', ok: false, error: error ?? 'Tool call failed.' },
       ]
-      await appendMessage(db, conversationId, {
+      await appendMessage(conversationId, {
         role: 'tool',
         content: blocks,
         toolCallId,
@@ -139,7 +137,6 @@ export function createConversationsPersister(
       // OpenRouter catalogue, cache-aware; Ollama is free. Token counts are
       // always trusted as reported by the driver.
       const costUsd = usage.costUsd ?? await resolveCostUsd(
-        db,
         ctx.providerId,
         ctx.modelId,
         {

@@ -22,8 +22,7 @@
 
 import type { AllowedApiTarget, ValidatedApiCall } from '../protocol/apiCallSchema'
 import { TARGET_PERMISSIONS } from '../protocol/targets'
-import type { DbClient } from '../../db/client'
-import { hostPlugins, getDbForApi, assertHostPluginPermission } from './registry'
+import { hostPlugins, assertHostPluginPermission } from './registry'
 import { replyApiError } from './apiReplies'
 import type { HostPluginRecord } from './types'
 import { handleRoutesRegister } from './handlers/routes'
@@ -61,7 +60,6 @@ import {
 type HostApiHandler<TTarget extends AllowedApiTarget> = (
   msg: Extract<ValidatedApiCall, { target: TTarget }>,
   entry: HostPluginRecord,
-  db: DbClient,
 ) => Promise<void>
 /**
  * One handler per target, keyed by the SSOT target union. Because
@@ -74,7 +72,6 @@ type HostApiHandlerTable = { [Target in AllowedApiTarget]: HostApiHandler<Target
 type AnyHostApiHandler = (
   msg: ValidatedApiCall,
   entry: HostPluginRecord,
-  db: DbClient,
 ) => Promise<void>
 
 const apiHandlers = {
@@ -120,11 +117,6 @@ const apiHandlers = {
 } satisfies HostApiHandlerTable
 
 export async function dispatchApiCall(msg: ValidatedApiCall): Promise<void> {
-  const db = getDbForApi()
-  if (!db) {
-    replyApiError(msg.pluginId, msg.correlationId, 'Plugin worker host has no DbClient configured')
-    return
-  }
   const entry = hostPlugins.get(msg.pluginId)
   if (!entry) {
     replyApiError(msg.pluginId, msg.correlationId, `Plugin "${msg.pluginId}" is not loaded`)
@@ -145,7 +137,7 @@ export async function dispatchApiCall(msg: ValidatedApiCall): Promise<void> {
     // limitation (it can't tie `apiHandlers[msg.target]` to `msg`'s narrowed
     // shape), it does NOT mask a missing handler.
     const handler = apiHandlers[msg.target] as AnyHostApiHandler
-    await handler(msg, entry, db)
+    await handler(msg, entry)
   } catch (err) {
     replyApiError(msg.pluginId, msg.correlationId, err instanceof Error ? err.message : String(err))
   }

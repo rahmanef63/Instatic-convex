@@ -17,7 +17,6 @@
 
 import type { PluginSettingDefinition, PluginSettingsValues } from '@core/plugin-sdk'
 import { hookBus } from '@core/plugins/hookBus'
-import type { DbClient } from '../../db/client'
 import { setPluginSettings } from '../../repositories/plugins'
 import { refreshPluginSettingsCache } from '../settingsCache'
 import { updateSettingsInWorker } from './rpc'
@@ -44,13 +43,12 @@ import { updateSettingsInWorker } from './rpc'
  * load time.
  */
 export async function persistAndSyncPluginSettings(
-  db: DbClient,
   pluginId: string,
   declared: ReadonlyArray<PluginSettingDefinition>,
   cleaned: PluginSettingsValues,
 ): Promise<PluginSettingsValues> {
-  await setPluginSettings(db, pluginId, declared, cleaned)
-  const runtimeSettings = (await refreshPluginSettingsCache(db, pluginId)) ?? cleaned
+  await setPluginSettings(pluginId, declared, cleaned)
+  const runtimeSettings = (await refreshPluginSettingsCache(pluginId)) ?? cleaned
   try {
     await updateSettingsInWorker(pluginId, runtimeSettings)
   } catch (err) {

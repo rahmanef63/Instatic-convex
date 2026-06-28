@@ -8,7 +8,7 @@
  *
  * Flow:
  *
- *   1. `getElectedAdapterId(db, role)`     — snapshot the elected adapter id.
+ *   1. `getElectedAdapterId(role)`         — snapshot the elected adapter id.
  *   2. `mediaStorageRegistry.resolve(...)` — look up the live adapter.
  *   3. `adapter.beginWrite({ bytes-meta })` — adapter returns an upload plan.
  *   4. `executeUploadPlan(plan, bytes)`    — host streams bytes per step.
@@ -24,7 +24,6 @@
  */
 
 import { nanoid } from 'nanoid'
-import type { DbClient } from '../../db/client'
 import type {
   MediaAssetRole,
   MediaStorageAdapter,
@@ -103,10 +102,9 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
  * break the user's "S3 is my primary storage" expectation.
  */
 async function resolveWriteAdapter(
-  db: DbClient,
   role: MediaAssetRole,
 ): Promise<MediaStorageAdapter> {
-  const adapterId = await getElectedAdapterId(db, role)
+  const adapterId = await getElectedAdapterId(role)
   const adapter = mediaStorageRegistry.resolve(adapterId, role)
   if (!adapter) {
     throw new MediaStorageDispatchError(
@@ -127,10 +125,9 @@ async function resolveWriteAdapter(
  * adapter's `abortWrite` is best-effort invoked before the error bubbles.
  */
 export async function dispatchUpload(
-  db: DbClient,
   input: DispatchUploadInput,
 ): Promise<DispatchUploadResult> {
-  const adapter = await resolveWriteAdapter(db, input.role)
+  const adapter = await resolveWriteAdapter(input.role)
   const contentHash = await sha256Hex(input.bytes)
 
   // Stage 1 — adapter signs the upload plan.

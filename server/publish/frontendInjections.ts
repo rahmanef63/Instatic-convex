@@ -27,7 +27,6 @@
  * so every HTML-emitting render path gets the same treatment.
  */
 
-import type { DbClient } from '../db/client'
 import { listInstalledPlugins, type InstalledPluginResult } from '../repositories/plugins'
 import { mediaStorageRegistry } from '@core/plugins/mediaStorageRegistry'
 import { listElectedAdapters } from '../repositories/mediaStorageAdapters'
@@ -103,8 +102,8 @@ export interface FrontendInjections {
 // Collection — walk installed plugins, build a plan
 // ---------------------------------------------------------------------------
 
-export async function collectFrontendInjections(db: DbClient): Promise<FrontendInjections> {
-  const results = await listInstalledPlugins(db)
+export async function collectFrontendInjections(): Promise<FrontendInjections> {
+  const results = await listInstalledPlugins()
   const tags: Record<FrontendAssetPlacement, string[]> = {
     'head': [],
     'head-end': [],
@@ -160,7 +159,7 @@ export async function collectFrontendInjections(db: DbClient): Promise<FrontendI
     hasInlineStyle,
     hasExternalScript,
     networkAllowedHosts: [...networkAllowedHostsSet].sort(),
-    mediaCspOrigins: await collectMediaAdapterCspOrigins(db),
+    mediaCspOrigins: await collectMediaAdapterCspOrigins(),
   }
 }
 
@@ -420,10 +419,8 @@ function toCspHostSources(hosts: string[]): string[] {
  * `avatar`, or `font`).  Adapters that are installed but not elected to any
  * role have no upload activity and therefore no CSP entitlement.
  */
-async function collectMediaAdapterCspOrigins(
-  db: DbClient,
-): Promise<FrontendInjections['mediaCspOrigins']> {
-  const elections = await listElectedAdapters(db)
+async function collectMediaAdapterCspOrigins(): Promise<FrontendInjections['mediaCspOrigins']> {
+  const elections = await listElectedAdapters()
   const seen = new Set<string>()
   const out: Array<{ directive: 'img-src' | 'media-src' | 'connect-src'; origin: string }> = []
   for (const election of elections) {

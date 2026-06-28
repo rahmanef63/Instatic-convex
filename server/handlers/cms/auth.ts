@@ -23,7 +23,6 @@
  * Parameterised paths (currently only the session revoke route) use a `RegExp`
  * pattern with a named capture group.
  */
-import type { DbClient } from '../../db/client'
 import {
   createSessionToken,
   hashSessionToken,
@@ -127,7 +126,6 @@ async function verifyUserTotpCode(user: AuthUser, code: string): Promise<boolean
  * still applies.
  */
 async function enforceLoginIpRateLimit(
-  db: DbClient,
   req: Request,
   email: string,
   ip: string | null,
@@ -135,14 +133,14 @@ async function enforceLoginIpRateLimit(
   if (!ip) return null
   const decision = loginPerIpRateLimit.consume(ip)
   if (decision.ok) return null
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: email || null,
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
     userId: null,
     result: 'rate_limited',
   })
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: null,
     action: 'login.rate_limited',
     targetType: 'user',
@@ -163,7 +161,6 @@ async function enforceLoginIpRateLimit(
  * cannot make us burn argon2id CPU cycles.
  */
 async function enforceLoginTupleRateLimit(
-  db: DbClient,
   req: Request,
   email: string,
   ip: string | null,
@@ -171,14 +168,14 @@ async function enforceLoginTupleRateLimit(
 ): Promise<Response | null> {
   const decision = loginRateLimit.consume(rateLimitKey)
   if (decision.ok) return null
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: email || null,
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
     userId: null,
     result: 'rate_limited',
   })
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: null,
     action: 'login.rate_limited',
     targetType: 'user',
@@ -195,21 +192,20 @@ async function enforceLoginTupleRateLimit(
  * `Retry-After` header derived from `locked_until`.
  */
 async function respondLoginAccountLocked(
-  db: DbClient,
   req: Request,
   user: AuthUser,
   email: string,
   ip: string | null,
   retryAfterMs: number,
 ): Promise<Response> {
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: email || null,
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
     userId: user.id,
     result: 'locked',
   })
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'login.failure',
     targetType: 'user',
@@ -227,7 +223,6 @@ async function respondLoginAccountLocked(
  * triggered) or 401 (generic failure).
  */
 async function respondLoginFailure(
-  db: DbClient,
   req: Request,
   user: AuthUser | null,
   email: string,
@@ -239,7 +234,7 @@ async function respondLoginFailure(
       ? 'account_disabled'
       : 'bad_password'
 
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: email || null,
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
@@ -255,10 +250,10 @@ async function respondLoginFailure(
   let lockedUntilIso: string | null = null
   if (user && user.status === 'active' && failureReason === 'bad_password') {
     const lockout = evaluateFailedAttempt(user.failedLoginCount)
-    await recordFailedLoginAttempt(db, user.id, lockout.lockedUntil)
+    await recordFailedLoginAttempt(user.id, lockout.lockedUntil)
     if (lockout.triggered && lockout.lockedUntil) {
       lockedUntilIso = lockout.lockedUntil.toISOString()
-      await createAuditEvent(db, {
+      await createAuditEvent({
         actorUserId: user.id,
         action: 'login.locked',
         targetType: 'user',
@@ -273,7 +268,7 @@ async function respondLoginFailure(
     }
   }
 
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user?.id ?? null,
     action: 'login.failure',
     targetType: 'user',
@@ -296,7 +291,6 @@ async function respondLoginFailure(
  * `POST /auth/mfa/verify`. Without MFA the session is immediately valid.
  */
 async function respondLoginSuccess(
-  db: DbClient,
   req: Request,
   user: AuthUser,
   email: string,
@@ -312,7 +306,7 @@ async function respondLoginSuccess(
 
   const token = createSessionToken()
   const expiresAt = sessionExpiry()
-  await createSession(db, {
+  await createSession({
     idHash: await hashSessionToken(token),
     userId: user.id,
     expiresAt,
@@ -327,17 +321,17 @@ async function respondLoginSuccess(
     )
   }
 
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: email || null,
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
     userId: user.id,
     result: 'success',
   })
-  await markUserLoggedIn(db, user.id)
+  await markUserLoggedIn(user.id)
 
   if (wasPreviouslyLocked) {
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'login.unlocked',
       targetType: 'user',
@@ -347,7 +341,7 @@ async function respondLoginSuccess(
     })
   }
 
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'login.success',
     targetType: 'user',
@@ -364,17 +358,17 @@ async function respondLoginSuccess(
 
 const LoginBodySchema = Type.Object({ email: Type.String(), password: Type.String() })
 
-async function handleLogin(req: Request, db: DbClient): Promise<Response> {
+async function handleLogin(req: Request): Promise<Response> {
   const body = await readValidatedBody(req, LoginBodySchema)
   const email = (body?.email ?? '').trim().toLowerCase()
   const password = (body?.password ?? '').trim()
   const ip = clientIp(req)
 
-  const ipBlock = await enforceLoginIpRateLimit(db, req, email, ip)
+  const ipBlock = await enforceLoginIpRateLimit(req, email, ip)
   if (ipBlock) return ipBlock
 
   const rateLimitKey = `${ip ?? 'unknown'}|${email}`
-  const tupleBlock = await enforceLoginTupleRateLimit(db, req, email, ip, rateLimitKey)
+  const tupleBlock = await enforceLoginTupleRateLimit(req, email, ip, rateLimitKey)
   if (tupleBlock) return tupleBlock
 
   // Constant-time path: ALWAYS run argon2id verify, even when the email
@@ -383,7 +377,7 @@ async function handleLogin(req: Request, db: DbClient): Promise<Response> {
   // email enumeration. We verify against a fixed dummy hash on the no-user
   // branch; the result is always false, but the latency profile is the
   // same as the real branch.
-  const user = await findUserByEmail(db, email)
+  const user = await findUserByEmail(email)
   const verifiedHash = user?.passwordHash ?? (await getDummyPasswordHash())
   const passwordOk = await verifyPassword(password, verifiedHash)
 
@@ -393,25 +387,25 @@ async function handleLogin(req: Request, db: DbClient): Promise<Response> {
   if (user) {
     const lockState = evaluateLockState(user.lockedUntil)
     if (lockState.locked) {
-      return respondLoginAccountLocked(db, req, user, email, ip, lockState.retryAfterMs)
+      return respondLoginAccountLocked(req, user, email, ip, lockState.retryAfterMs)
     }
   }
 
   if (!user || user.status !== 'active' || !passwordOk) {
-    return respondLoginFailure(db, req, user, email, ip)
+    return respondLoginFailure(req, user, email, ip)
   }
 
-  return respondLoginSuccess(db, req, user, email, ip, rateLimitKey)
+  return respondLoginSuccess(req, user, email, ip, rateLimitKey)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /auth/mfa/verify
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
+async function handleMfaVerify(req: Request): Promise<Response> {
   const idHash = await getSessionHash(req)
   if (!idHash) return jsonResponse({ error: 'Unauthorized' }, { status: 401 })
-  const user = await findUserByPendingMfaSessionHash(db, idHash)
+  const user = await findUserByPendingMfaSessionHash(idHash)
   if (!user) return jsonResponse({ error: 'Unauthorized' }, { status: 401 })
 
   const ip = clientIp(req)
@@ -422,7 +416,7 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
   // TOTP step indefinitely (ISS-001).
   const lockState = evaluateLockState(user.lockedUntil)
   if (lockState.locked) {
-    await recordLoginAttempt(db, {
+    await recordLoginAttempt({
       emailNorm: user.email.toLowerCase(),
       ipAddress: ip,
       userAgent: req.headers.get('user-agent'),
@@ -435,7 +429,7 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
   const rateLimitKey = ip ?? 'unknown'
   const decision = mfaRateLimit.consume(rateLimitKey)
   if (!decision.ok) {
-    await recordLoginAttempt(db, {
+    await recordLoginAttempt({
       emailNorm: user.email.toLowerCase(),
       ipAddress: ip,
       userAgent: req.headers.get('user-agent'),
@@ -453,7 +447,7 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
   const totpOk = totpResult
   const recoveryHash = findMatchingRecoveryCodeHash(code, user.mfaRecoveryCodeHashes)
   if (!totpOk && !recoveryHash) {
-    await recordLoginAttempt(db, {
+    await recordLoginAttempt({
       emailNorm: user.email.toLowerCase(),
       ipAddress: ip,
       userAgent: req.headers.get('user-agent'),
@@ -464,8 +458,8 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
     // step does — this is the defense distributed TOTP brute force was missing
     // (ISS-001). A successful verify resets it via markUserLoggedIn.
     const lockout = evaluateFailedAttempt(user.failedLoginCount)
-    await recordFailedLoginAttempt(db, user.id, lockout.lockedUntil)
-    await createAuditEvent(db, {
+    await recordFailedLoginAttempt(user.id, lockout.lockedUntil)
+    await createAuditEvent({
       actorUserId: user.id,
       action: lockout.triggered ? 'login.locked' : 'login.failure',
       targetType: 'user',
@@ -479,19 +473,19 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
   }
 
   if (recoveryHash) {
-    const consumed = await consumeUserRecoveryCodeHash(db, user.id, recoveryHash)
+    const consumed = await consumeUserRecoveryCodeHash(user.id, recoveryHash)
     if (!consumed) return jsonResponse({ error: 'Invalid authentication code' }, { status: 401 })
   }
 
   const nextToken = createSessionToken()
-  const rotatedSession = await rotateSessionToken(db, idHash, {
+  const rotatedSession = await rotateSessionToken(idHash, {
     nextIdHash: await hashSessionToken(nextToken),
     mfaPassedAt: new Date(),
   })
   if (!rotatedSession) return jsonResponse({ error: 'Unauthorized' }, { status: 401 })
 
-  await markUserLoggedIn(db, user.id)
-  await recordLoginAttempt(db, {
+  await markUserLoggedIn(user.id)
+  await recordLoginAttempt({
     emailNorm: user.email.toLowerCase(),
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
@@ -500,7 +494,7 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
   })
   mfaRateLimit.reset(rateLimitKey)
   if (ip) loginPerIpRateLimit.reset(ip)
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'login.success',
     targetType: 'user',
@@ -518,12 +512,12 @@ async function handleMfaVerify(req: Request, db: DbClient): Promise<Response> {
 // POST /logout, GET /me
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function handleLogout(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+async function handleLogout(req: Request): Promise<Response> {
+  const user = await requireAuthenticatedUser(req)
   const idHash = await getSessionHash(req)
-  if (idHash) await revokeSessionByHash(db, idHash)
+  if (idHash) await revokeSessionByHash(idHash)
   if (!(user instanceof Response)) {
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'logout',
       targetType: 'user',
@@ -535,8 +529,8 @@ async function handleLogout(req: Request, db: DbClient): Promise<Response> {
   return setCookieHeader(jsonResponse({ ok: true }), clearSessionCookie(req))
 }
 
-async function handleMe(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+async function handleMe(req: Request): Promise<Response> {
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
   return jsonResponse({ user: toPublicUser(user), role: user.role, capabilities: user.capabilities })
 }
@@ -549,21 +543,20 @@ async function handleMe(req: Request, db: DbClient): Promise<Response> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function recordStepUpRateLimit(
-  db: DbClient,
   req: Request,
   user: AuthUser,
   ip: string | null,
   scope: 'ip' | 'tuple',
   retryAfterMs: number,
 ): Promise<Response> {
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: user.email.toLowerCase(),
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
     userId: user.id,
     result: 'rate_limited',
   })
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'login.rate_limited',
     targetType: 'user',
@@ -580,12 +573,11 @@ async function recordStepUpRateLimit(
 }
 
 async function recordStepUpPasswordFailure(
-  db: DbClient,
   req: Request,
   user: AuthUser,
   ip: string | null,
 ): Promise<Response> {
-  await recordLoginAttempt(db, {
+  await recordLoginAttempt({
     emailNorm: user.email.toLowerCase(),
     ipAddress: ip,
     userAgent: req.headers.get('user-agent'),
@@ -594,10 +586,10 @@ async function recordStepUpPasswordFailure(
   })
 
   const lockout = evaluateFailedAttempt(user.failedLoginCount)
-  await recordFailedLoginAttempt(db, user.id, lockout.lockedUntil)
+  await recordFailedLoginAttempt(user.id, lockout.lockedUntil)
 
   if (lockout.triggered && lockout.lockedUntil) {
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'login.locked',
       targetType: 'user',
@@ -612,7 +604,7 @@ async function recordStepUpPasswordFailure(
     })
   }
 
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'login.failure',
     targetType: 'user',
@@ -637,7 +629,6 @@ async function recordStepUpPasswordFailure(
  *     a recovery code was consumed); continue to mint the step-up window.
  */
 async function verifyStepUpMfa(
-  db: DbClient,
   req: Request,
   user: AuthUser,
   ip: string | null,
@@ -653,7 +644,7 @@ async function verifyStepUpMfa(
   const rateLimitKey = ip ?? 'unknown'
   const mfaDecision = mfaRateLimit.consume(rateLimitKey)
   if (!mfaDecision.ok) {
-    await recordLoginAttempt(db, {
+    await recordLoginAttempt({
       emailNorm: user.email.toLowerCase(),
       ipAddress: ip,
       userAgent: req.headers.get('user-agent'),
@@ -674,14 +665,14 @@ async function verifyStepUpMfa(
   const totpOk = totpResult
   const recoveryHash = findMatchingRecoveryCodeHash(mfaCode, user.mfaRecoveryCodeHashes)
   if (!totpOk && !recoveryHash) {
-    await recordLoginAttempt(db, {
+    await recordLoginAttempt({
       emailNorm: user.email.toLowerCase(),
       ipAddress: ip,
       userAgent: req.headers.get('user-agent'),
       userId: user.id,
       result: 'mfa_failed',
     })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'login.failure',
       targetType: 'user',
@@ -697,14 +688,14 @@ async function verifyStepUpMfa(
 
   let refreshedUser = user
   if (recoveryHash) {
-    const consumed = await consumeUserRecoveryCodeHash(db, user.id, recoveryHash)
+    const consumed = await consumeUserRecoveryCodeHash(user.id, recoveryHash)
     if (!consumed) {
       return {
         failure: jsonResponse({ error: 'Invalid authentication code' }, { status: 401 }),
         user: null,
       }
     }
-    refreshedUser = await findUserById(db, user.id) ?? user
+    refreshedUser = await findUserById(user.id) ?? user
   }
 
   mfaRateLimit.reset(rateLimitKey)
@@ -724,8 +715,8 @@ async function verifyStepUpMfa(
  * `login_attempts` with `result: 'bad_password'` so the forensic trail
  * captures them.
  */
-async function handleStepUp(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+async function handleStepUp(req: Request): Promise<Response> {
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
   const idHash = await getSessionHash(req)
   if (!idHash) return jsonResponse({ error: 'Unauthorized' }, { status: 401 })
@@ -741,14 +732,14 @@ async function handleStepUp(req: Request, db: DbClient): Promise<Response> {
   if (ip) {
     const ipDecision = loginPerIpRateLimit.consume(ip)
     if (!ipDecision.ok) {
-      return recordStepUpRateLimit(db, req, user, ip, 'ip', ipDecision.retryAfterMs)
+      return recordStepUpRateLimit(req, user, ip, 'ip', ipDecision.retryAfterMs)
     }
   }
 
   const rateLimitKey = `${ip ?? 'unknown'}|${user.email.toLowerCase()}`
   const decision = loginRateLimit.consume(rateLimitKey)
   if (!decision.ok) {
-    return recordStepUpRateLimit(db, req, user, ip, 'tuple', decision.retryAfterMs)
+    return recordStepUpRateLimit(req, user, ip, 'tuple', decision.retryAfterMs)
   }
 
   const StepUpBodySchema = Type.Object({ password: Type.String(), mfaCode: Type.Optional(Type.String()) })
@@ -757,20 +748,20 @@ async function handleStepUp(req: Request, db: DbClient): Promise<Response> {
   const mfaCode = (body?.mfaCode ?? '').trim()
   const passwordOk = await verifyPassword(password, user.passwordHash)
   if (!passwordOk) {
-    return recordStepUpPasswordFailure(db, req, user, ip)
+    return recordStepUpPasswordFailure(req, user, ip)
   }
   loginRateLimit.reset(rateLimitKey)
 
   let refreshedUser = user
   if (user.mfaEnabled) {
-    const mfaResult = await verifyStepUpMfa(db, req, user, ip, mfaCode)
+    const mfaResult = await verifyStepUpMfa(req, user, ip, mfaCode)
     if (mfaResult.failure) return mfaResult.failure
     refreshedUser = mfaResult.user
   }
 
   const expiresAt = new Date(Date.now() + stepUpWindowMs(refreshedUser.stepUpWindowMinutes))
   const nextToken = createSessionToken()
-  const rotatedSession = await rotateSessionToken(db, idHash, {
+  const rotatedSession = await rotateSessionToken(idHash, {
     nextIdHash: await hashSessionToken(nextToken),
     stepUpExpiresAt: expiresAt,
   })
@@ -800,10 +791,10 @@ async function handleStepUp(req: Request, db: DbClient): Promise<Response> {
  * ships a UA parser. The raw `userAgent` is omitted from the wire — operators
  * can still consult the raw column directly for forensics.
  */
-async function handleActivity(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+async function handleActivity(req: Request): Promise<Response> {
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
-  const attempts = await listLoginActivityForUser(db, user.id, user.email.toLowerCase())
+  const attempts = await listLoginActivityForUser(user.id, user.email.toLowerCase())
   const events = attempts.map((attempt) => ({
     id: attempt.id,
     attemptedAt: attempt.attemptedAt,
@@ -836,6 +827,6 @@ const AUTH_ROUTES: readonly Route<[]>[] = [
   { method: 'POST', pattern: `${CMS_API_PREFIX}/auth/logout-all`, handler: handleLogoutAll },
 ]
 
-export async function handleAuthRoutes(req: Request, db: DbClient): Promise<Response | null> {
-  return runRouteTable(req, db, AUTH_ROUTES)
+export async function handleAuthRoutes(req: Request): Promise<Response | null> {
+  return runRouteTable(req, AUTH_ROUTES)
 }

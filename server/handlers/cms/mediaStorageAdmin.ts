@@ -25,7 +25,6 @@
  * see `server/repositories/mediaStorageAdapters.ts`.
  */
 
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import {
   badRequest,
@@ -61,12 +60,12 @@ const ALL_ROLES: ReadonlyArray<MediaAssetRole> = [
 ]
 
 
-async function handleListStorage(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'storage.elect')
+async function handleListStorage(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'storage.elect')
   if (user instanceof Response) return user
 
   const installedAdapters = mediaStorageRegistry.list()
-  const electedAdapters = await listElectedAdapters(db)
+  const electedAdapters = await listElectedAdapters()
 
   // Hydrate each elected row with the live adapter (when registered) so
   // the admin UI can show "currently elected: <label>" + a warning when
@@ -79,21 +78,21 @@ async function handleListStorage(req: Request, db: DbClient): Promise<Response> 
       electedByUserId: election.electedByUserId,
       installed: mediaStorageRegistry.resolveForRead(election.adapterId) !== null
         || election.adapterId === '',
-      assetCount: await countAssetsForAdapter(db, election.adapterId),
+      assetCount: await countAssetsForAdapter(election.adapterId),
     })),
   )
 
   const installedDelegates = mediaVariantDelegateRegistry.list()
-  const electedDelegate = await getElectedVariantDelegate(db)
+  const electedDelegate = await getElectedVariantDelegate()
 
   // Per-role migration backlog — the count of rows / variants whose
   // storage_adapter_id doesn't match the elected target. Powers the
   // "Migrate N pending →" affordance in the admin panel. Empty
   // adapter id ('') means local-disk is elected, which is a valid
   // target.
-  const originalsTarget = await getElectedAdapterId(db, 'original')
-  const variantsTarget = await getElectedAdapterId(db, 'variant')
-  const backlog = await countMigrationBacklog(db, {
+  const originalsTarget = await getElectedAdapterId('original')
+  const variantsTarget = await getElectedAdapterId('variant')
+  const backlog = await countMigrationBacklog({
     original: originalsTarget,
     variant: variantsTarget,
   })
@@ -135,8 +134,8 @@ const ElectAdapterBodySchema = Type.Object({
   adapterId: Type.String(),
 })
 
-async function handleElectAdapter(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'storage.elect')
+async function handleElectAdapter(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'storage.elect')
   if (user instanceof Response) return user
 
   const body = await readValidatedBody(req, ElectAdapterBodySchema)
@@ -160,7 +159,7 @@ async function handleElectAdapter(req: Request, db: DbClient): Promise<Response>
       )
     }
   }
-  const election = await electAdapter(db, role, adapterIdRaw, user.id)
+  const election = await electAdapter(role, adapterIdRaw, user.id)
   return jsonResponse({ election })
 }
 
@@ -168,8 +167,8 @@ const ElectDelegateBodySchema = Type.Object({
   delegateId: Type.Union([Type.String(), Type.Null()]),
 })
 
-async function handleElectDelegate(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireCapability(req, db, 'storage.elect')
+async function handleElectDelegate(req: Request): Promise<Response> {
+  const user = await requireCapability(req, 'storage.elect')
   if (user instanceof Response) return user
 
   const body = await readValidatedBody(req, ElectDelegateBodySchema)
@@ -178,7 +177,7 @@ async function handleElectDelegate(req: Request, db: DbClient): Promise<Response
   }
   const { delegateId } = body
   if (delegateId === null) {
-    await clearVariantDelegate(db)
+    await clearVariantDelegate()
     return jsonResponse({ electedDelegate: null })
   }
   if (!delegateId) {
@@ -192,7 +191,6 @@ async function handleElectDelegate(req: Request, db: DbClient): Promise<Response
     )
   }
   const electedDelegate = await electVariantDelegate(
-    db,
     {
       delegateId: delegate.id,
       variantUrlTemplate: delegate.variantUrlTemplate,
@@ -206,10 +204,9 @@ async function handleElectDelegate(req: Request, db: DbClient): Promise<Response
 
 async function handleVerifyAdapter(
   req: Request,
-  db: DbClient,
   adapterId: string,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'storage.elect')
+  const user = await requireCapability(req, 'storage.elect')
   if (user instanceof Response) return user
 
   const adapter = mediaStorageRegistry.resolveForRead(adapterId)
@@ -232,32 +229,31 @@ async function handleVerifyAdapter(
 
 export async function handleMediaStorageAdminRoutes(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
 ): Promise<Response | null> {
   const { pathname } = new URL(req.url)
   if (!pathname.startsWith(STORAGE_PREFIX)) return null
 
   if (pathname === STORAGE_PREFIX) {
-    if (req.method === 'GET') return handleListStorage(req, db)
+    if (req.method === 'GET') return handleListStorage(req)
     return methodNotAllowed()
   }
   if (pathname === `${STORAGE_PREFIX}/elect`) {
-    if (req.method === 'POST') return handleElectAdapter(req, db)
+    if (req.method === 'POST') return handleElectAdapter(req)
     return methodNotAllowed()
   }
   if (pathname === `${STORAGE_PREFIX}/delegate`) {
-    if (req.method === 'POST') return handleElectDelegate(req, db)
+    if (req.method === 'POST') return handleElectDelegate(req)
     return methodNotAllowed()
   }
   if (pathname === `${STORAGE_PREFIX}/migrate`) {
     // SSE stream — the handler owns its own response lifecycle.
-    return handleMediaStorageMigrate(req, db, options.uploadsDir)
+    return handleMediaStorageMigrate(req, options.uploadsDir)
   }
   const verifyMatch = pathname.match(new RegExp(`^${STORAGE_PREFIX}/verify/(.+)$`))
   if (verifyMatch) {
     if (req.method === 'POST') {
-      return handleVerifyAdapter(req, db, decodeURIComponent(verifyMatch[1] ?? ''))
+      return handleVerifyAdapter(req, decodeURIComponent(verifyMatch[1] ?? ''))
     }
     return methodNotAllowed()
   }

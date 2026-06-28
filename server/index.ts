@@ -1,9 +1,19 @@
-import { createDbClient } from './db'
-import { runMigrations } from './db/runMigrations'
 import { syncSystemRoles } from './repositories/roles'
 import { readServerConfig } from './config'
 import { DEV_ORIGIN_ALLOWLIST, configurePublicOrigins, configureTrustedProxyCidrs, stampSocketIp } from './auth/security'
 import { startConversationPurgeTick } from './ai/boot'
+import { registerLoopDataAdapter } from './loops/adapter'
+
+// The server has no local datastore — every repository reaches the Convex
+// backend through `server/convex/client.ts:getConvex()`, which reads the
+// backend URL from `CONVEX_SELF_HOSTED_URL` (or `CONVEX_URL`). Fail fast at
+// boot with a clear message rather than letting the first request throw deep
+// inside a handler.
+if (!process.env.CONVEX_SELF_HOSTED_URL && !process.env.CONVEX_URL) {
+  throw new Error(
+    '[server] CONVEX_SELF_HOSTED_URL (or CONVEX_URL) must be set — the server cannot run without a Convex backend',
+  )
+}
 
 await import('./richtextSanitizer')
 const { handleServerRequest } = await import('./router')
@@ -13,21 +23,21 @@ const { mediaStorageRegistry } = await import('@core/plugins/mediaStorageRegistr
 const config = readServerConfig()
 configureTrustedProxyCidrs(config.trustedProxyCidrs)
 configurePublicOrigins(config.publicOrigins)
-const { db, migrations } = createDbClient(config.databaseUrl)
-await runMigrations(db, migrations)
-// System role sync runs after migrations on every boot — the Owner row's
-// capabilities are force-reset to `CORE_CAPABILITIES` so existing
-// installations don't strand owners on a stale grant list when new
-// capabilities are added in code. See `syncSystemRoles` for the policy.
-await syncSystemRoles(db)
+// System role sync runs on every boot — the Owner row's capabilities are
+// force-reset to `CORE_CAPABILITIES` so existing installations don't strand
+// owners on a stale grant list when new capabilities are added in code. See
+// `syncSystemRoles` for the policy.
+await syncSystemRoles()
+// Wire the Convex-backed loop data adapter before any loop source fetches.
+registerLoopDataAdapter()
 // Wire the built-in local-disk media adapter BEFORE plugins activate —
 // plugin adapters register through the same registry but local-disk is
 // always the fallback for unset roles. See `mediaStorageRegistry.ts`.
 mediaStorageRegistry.configureLocalDisk({ uploadsDir: config.uploadsDir })
-await activateInstalledServerPlugins(db, config.uploadsDir)
+await activateInstalledServerPlugins(config.uploadsDir)
 // AI runtime: start the nightly conversation-purge tick. Operators add
 // their own provider credentials via /admin/ai/providers on first install.
-startConversationPurgeTick(db)
+startConversationPurgeTick()
 
 /**
  * Build the CORS response headers for an incoming request.
@@ -85,10 +95,8 @@ Bun.serve({
 
     try {
       const res = await handleServerRequest(req, {
-        db,
         staticDir: config.staticDir,
         uploadsDir: config.uploadsDir,
-        databaseUrl: config.databaseUrl,
       })
       for (const [k, v] of Object.entries(cors)) {
         res.headers.set(k, v)

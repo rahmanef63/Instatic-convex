@@ -18,7 +18,6 @@
  */
 
 import { Type } from '@sinclair/typebox'
-import type { DbClient } from '../../../db/client'
 import type { DataRow, DataRowCells, PublishedDataRow } from '@core/data/schemas'
 import { resolveTemplateChain, composeTemplateChain } from '@core/templates'
 import { buildRouteFrame } from '@core/templates/contextFrames'
@@ -58,16 +57,15 @@ const PreviewBodySchema = Type.Object({
 
 export async function handleRowPreview(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const user = await requireDataAccess(req, db)
+  const user = await requireDataAccess(req)
   if (user instanceof Response) return user
 
-  const row = await getDataRow(db, params.id)
+  const row = await getDataRow(params.id)
   if (!row) return jsonResponse({ error: 'Row not found' }, { status: 404 })
 
-  const table = await getDataTable(db, row.tableId)
+  const table = await getDataTable(row.tableId)
   if (!table) return jsonResponse({ error: 'Table not found' }, { status: 404 })
 
   if (!canReadDataRow(user, row)) return forbidden()
@@ -81,7 +79,7 @@ export async function handleRowPreview(
     ...(body.cells ?? {}),
   }
 
-  const snapshot = await getLatestPublishedSiteSnapshot(db)
+  const snapshot = await getLatestPublishedSiteSnapshot()
   if (!snapshot) {
     return jsonResponse({ error: 'Site has no published version yet' }, { status: 409 })
   }
@@ -102,8 +100,8 @@ export async function handleRowPreview(
 
   const cssBundle = buildSiteCssBundle(snapshot.site, registry, merged)
   const [loopData, mediaAssets] = await Promise.all([
-    prefetchLoopData(merged, snapshot.site, db),
-    prefetchMediaAssets(merged, snapshot.site, registry, db),
+    prefetchLoopData(merged, snapshot.site),
+    prefetchMediaAssets(merged, snapshot.site, registry),
   ])
 
   const publicPath = buildEntryPublicPath(table.routeBase, draftPublishedRow.slug)
@@ -135,7 +133,6 @@ export async function handleRowPreview(
       jsModuleIds: published.jsModuleIds.filter((id) => moduleJsMap.has(id)),
       publishVersion: getPublishVersion(),
     },
-    db,
   )
 
   return new Response(finalHtml, {

@@ -1,7 +1,6 @@
 import type { ContentTableSchema as ContentTableSchemaShape } from '@core/plugin-sdk/contentSchemas'
 import type { DataField } from '@core/data/schemas'
 import { listDataTables } from '../../repositories/data'
-import type { DbClient } from '../../db/client'
 
 type PluginContentFieldForCreate = ContentTableSchemaShape['fields'][number]
 
@@ -18,8 +17,8 @@ function pluginFieldCommon(field: PluginContentFieldForCreate): {
   }
 }
 
-export async function buildContentTableIdLookup(db: DbClient): Promise<Map<string, string>> {
-  const tables = await listDataTables(db)
+export async function buildContentTableIdLookup(): Promise<Map<string, string>> {
+  const tables = await listDataTables()
   return new Map(tables.map((t) => [t.slug, t.id]))
 }
 

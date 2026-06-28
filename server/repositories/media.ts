@@ -2,11 +2,7 @@
  * Media assets repository.
  *
  * Convex port: the read/write bodies are now thin adapters over `convex/media.ts`
- * (docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged while the rest of the runtime is
- * still on the SQL path; it is dropped wholesale when `server/db/*` is retired
- * (§7).
+ * (docs/CONVEX-MIGRATION.md §2).
  *
  * What stays here, on the Bun side:
  * - **`mapMediaAssetRow` / `parseVariants`** (from `./mediaAssetMapping`) — the
@@ -23,7 +19,6 @@
  * @see convex/media.ts                 — the Convex query/mutation functions
  * @see server/repositories/mediaAssetMapping.ts — the pure row → asset mapper
  */
-import type { DbClient } from '../db/client'
 import { mapMediaAssetRow, parseVariants, type MediaAssetRow } from './mediaAssetMapping'
 import type { MediaAsset, MediaVariant } from './mediaTypes'
 import { api, getConvex } from '../convex/client'
@@ -67,7 +62,6 @@ function toAsset(row: ConvexMediaAssetRow): MediaAsset {
 }
 
 export async function createMediaAsset(
-  _db: DbClient,
   input: CreateMediaAssetInput,
 ): Promise<MediaAsset> {
   const row = await getConvex().mutation(api.media.create, {
@@ -85,7 +79,6 @@ export async function createMediaAsset(
 }
 
 export async function getMediaAsset(
-  _db: DbClient,
   id: string,
 ): Promise<MediaAsset | null> {
   const row = await getConvex().query(api.media.get, { id })
@@ -99,7 +92,6 @@ export async function getMediaAsset(
  * enough (low thousands per site) that the round-trip dominates.
  */
 export async function listMediaAssets(
-  _db: DbClient,
   options: { includeDeleted?: boolean } = {},
 ): Promise<MediaAsset[]> {
   const rows = await getConvex().query(api.media.list, {
@@ -109,7 +101,6 @@ export async function listMediaAssets(
 }
 
 export async function renameMediaAsset(
-  _db: DbClient,
   id: string,
   filename: string,
 ): Promise<MediaAsset | null> {
@@ -124,7 +115,6 @@ export async function renameMediaAsset(
  * the write so equality checks against a `{ tag }` filter behave predictably.
  */
 export async function updateMediaAssetMetadata(
-  _db: DbClient,
   id: string,
   input: UpdateMediaAssetMetadataInput,
 ): Promise<MediaAsset | null> {
@@ -149,7 +139,6 @@ export async function updateMediaAssetMetadata(
  * because these columns are set exactly once per binary (or once per replace).
  */
 export async function setMediaAssetVariants(
-  _db: DbClient,
   id: string,
   input: {
     width: number | null
@@ -173,7 +162,6 @@ export async function setMediaAssetVariants(
  * finishes the job by removing the row (and caller removes the on-disk file).
  */
 export async function softDeleteMediaAsset(
-  _db: DbClient,
   id: string,
 ): Promise<MediaAsset | null> {
   const row = await getConvex().mutation(api.media.softDelete, { id })
@@ -181,7 +169,6 @@ export async function softDeleteMediaAsset(
 }
 
 export async function restoreMediaAsset(
-  _db: DbClient,
   id: string,
 ): Promise<MediaAsset | null> {
   const row = await getConvex().mutation(api.media.restore, { id })
@@ -193,7 +180,6 @@ export async function restoreMediaAsset(
  * on-disk file using the returned `storagePath`.
  */
 export async function deleteMediaAsset(
-  _db: DbClient,
   id: string,
 ): Promise<{ storagePath: string } | null> {
   return getConvex().mutation(api.media.hardDelete, { id })
@@ -211,7 +197,6 @@ export async function deleteMediaAsset(
  * URL change is transparent to consumers.
  */
 export async function replaceMediaAssetBinary(
-  _db: DbClient,
   id: string,
   input: {
     filename: string
@@ -242,7 +227,6 @@ export async function replaceMediaAssetBinary(
  * one.
  */
 export async function getMediaAssetStoragePath(
-  _db: DbClient,
   id: string,
 ): Promise<string | null> {
   return getConvex().query(api.media.storagePath, { id })
@@ -255,7 +239,6 @@ export async function getMediaAssetStoragePath(
  * images that didn't need a ladder).
  */
 export async function getMediaAssetVariants(
-  _db: DbClient,
   id: string,
 ): Promise<MediaVariant[]> {
   const variantsJson = await getConvex().query(api.media.variantsJson, { id })
@@ -270,7 +253,6 @@ export async function getMediaAssetVariants(
  * the SQL `ON CONFLICT DO NOTHING`).
  */
 export async function assignAssetToFolders(
-  _db: DbClient,
   assetId: string,
   input: { add?: string[]; remove?: string[] },
 ): Promise<MediaAsset | null> {
@@ -287,11 +269,11 @@ export async function assignAssetToFolders(
 // ---------------------------------------------------------------------------
 
 /** Count of non-deleted media assets available to export (no row hydration). */
-export async function countMediaAssetsForExport(_db: DbClient): Promise<number> {
+export async function countMediaAssetsForExport(): Promise<number> {
   return getConvex().query(api.media.countForExport, {})
 }
 
-export async function listMediaAssetsForExport(_db: DbClient): Promise<Array<MediaAsset & { storagePath: string }>> {
+export async function listMediaAssetsForExport(): Promise<Array<MediaAsset & { storagePath: string }>> {
   const rows = await getConvex().query(api.media.listForExport, {})
   return rows.map((row) => ({
     ...mapMediaAssetRow(row, row.folderIds),
@@ -333,7 +315,6 @@ interface ImportMediaAssetInput {
  * If an asset with the same id already exists it is replaced.
  */
 export async function importMediaAsset(
-  _db: DbClient,
   input: ImportMediaAssetInput,
 ): Promise<void> {
   const tags = Array.from(new Set(input.tags.map((t) => t.trim().toLowerCase()).filter(Boolean))).sort()

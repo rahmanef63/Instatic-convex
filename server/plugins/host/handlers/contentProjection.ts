@@ -12,7 +12,6 @@ import type {
   ContentTableSummary,
 } from '@core/plugin-sdk/contentSchemas'
 import type { DataField, DataRow, DataTable } from '@core/data/schemas'
-import type { DbClient } from '../../../db/client'
 import { getDataTableBySlug, listDataTables } from '../../../repositories/data'
 
 /**
@@ -103,8 +102,8 @@ export function tableSchema(
   }
 }
 
-export async function buildTableSlugLookup(db: DbClient): Promise<Map<string, string>> {
-  const tables = await listDataTables(db)
+export async function buildTableSlugLookup(): Promise<Map<string, string>> {
+  const tables = await listDataTables()
   return new Map(tables.map((t) => [t.id, t.slug]))
 }
 
@@ -129,10 +128,9 @@ export function rowToEntry(row: DataRow, tableSlug: string): ContentEntry {
  * EVERY `cms.content.*` api-call — one indexed lookup, never a full list.
  */
 export async function resolveTableBySlug(
-  db: DbClient,
   slug: string,
 ): Promise<DataTable> {
-  const found = await getDataTableBySlug(db, slug)
+  const found = await getDataTableBySlug(slug)
   if (!found) throw new Error(`Content table "${slug}" not found`)
   return found
 }

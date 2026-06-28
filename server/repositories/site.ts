@@ -12,12 +12,9 @@
  * The `name` is stored in the dedicated `site.name` column.
  *
  * Convex port: this file is now a thin adapter over `convex/site.ts` (see
- * docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged. The shell (de)serialization
- * (`readStoredShell` + `validateSite` + the `@core/page-tree` helpers) stays on
- * the Bun side; the Convex function returns / accepts only the raw `SiteRow`
- * columns. It is dropped wholesale when `server/db/*` is retired (§7).
+ * docs/CONVEX-MIGRATION.md §2). The shell (de)serialization (`readStoredShell` +
+ * `validateSite` + the `@core/page-tree` helpers) stays on the Bun side; the
+ * Convex function returns / accepts only the raw `SiteRow` columns.
  *
  * @see convex/site.ts — the Convex query/mutation functions
  */
@@ -31,7 +28,6 @@ import {
 import { validateSite } from '@core/persistence/validate'
 import { normalizeSitePackageJson } from '@core/site-dependencies/manifest'
 import { normalizeSiteRuntimeConfig } from '@core/site-runtime'
-import type { DbClient } from '../db/client'
 import type { SiteRow } from '../types'
 import { api, getConvex } from '../convex/client'
 
@@ -78,7 +74,7 @@ function readStoredShell(row: SiteRow): SiteShell {
   }
 }
 
-export async function getDraftSite(_db: DbClient): Promise<SiteShell | null> {
+export async function getDraftSite(): Promise<SiteShell | null> {
   const row = await getConvex().query(api.site.getDraft, {})
   if (!row) return null
 
@@ -87,7 +83,6 @@ export async function getDraftSite(_db: DbClient): Promise<SiteShell | null> {
 }
 
 export async function saveDraftSite(
-  _db: DbClient,
   shell: SiteShell,
   _actorUserId: string | null = null,
 ): Promise<void> {

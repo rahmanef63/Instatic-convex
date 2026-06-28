@@ -123,8 +123,8 @@ const listPostTypesTool: AiTool = {
   description:
     'List the post types (routable collections) a `postTypes` template can target. Each entry has { slug, label, routeBase, kind }; pass the `slug` values to setPageTemplate\'s `target.tableSlugs`. Only collections with a public route appear — non-routable data tables are excluded.',
   inputSchema: ListPostTypesInput,
-  handler: async (_input, ctx) => {
-    const tables = await listDataTablesWithCounts(ctx.db)
+  handler: async (_input, _ctx) => {
+    const tables = await listDataTablesWithCounts()
     const postTypes = tables
       .filter((t) => t.routeBase.trim() !== '')
       .map((t) => ({
@@ -204,7 +204,7 @@ const listLoopSourcesTool: AiTool = {
   description:
     'List loop source ids and the valid dynamic data tokens for loop children. Use before creating a <instatic-loop>. For posts/custom tables use sourceId "data.rows" and pass the chosen table id as data-table-id; inside the loop use returned tokens like {currentEntry.title}, never {{post.title}}.',
   inputSchema: ListLoopSourcesInput,
-  handler: async (_input, ctx) => {
+  handler: async (_input, _ctx) => {
     const sources = loopSourceRegistry.list().map((source) => ({
       id: source.id,
       label: source.label,
@@ -215,7 +215,7 @@ const listLoopSourcesTool: AiTool = {
       filterSchema: source.filterSchema,
       orderByOptions: source.orderByOptions,
     }))
-    const tables = await listDataTablesWithCounts(ctx.db)
+    const tables = await listDataTablesWithCounts()
     const dataMeta = buildDataMeta(tables)
     const dataRowsSource = loopSourceRegistry.get('data.rows')
     const dataRowsFields = dataRowsSource?.fields.map(loopFieldToAgentField) ?? []

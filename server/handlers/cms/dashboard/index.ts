@@ -37,7 +37,6 @@
  * site is obvious. Adding a new widget is: new `<widget>.ts` reader +
  * one entry in `DASHBOARD_READERS` below.
  */
-import type { DbClient } from '../../../db/client'
 import { requireAuthenticatedUser, requireCapability } from '../../../auth/authz'
 import type { CoreCapability } from '../../../auth/capabilities'
 import { jsonResponse, methodNotAllowed } from '../../../http'
@@ -59,7 +58,6 @@ import type { DashboardRequestContext } from './types'
 
 
 type DashboardReader = (
-  db: DbClient,
   options: CmsHandlerOptions,
   ctx: DashboardRequestContext,
 ) => Promise<unknown>
@@ -112,7 +110,6 @@ const DASHBOARD_READERS: Record<string, DashboardEndpoint> = {
 
 export async function handleDashboardRoutes(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions = {},
 ): Promise<Response | null> {
   const url = new URL(req.url)
@@ -127,13 +124,13 @@ export async function handleDashboardRoutes(
   // authenticated-user floor; everything else uses requireCapability so
   // the widget hides when the caller's role lacks the cap.
   const user = endpoint.capability === null
-    ? await requireAuthenticatedUser(req, db)
-    : await requireCapability(req, db, endpoint.capability)
+    ? await requireAuthenticatedUser(req)
+    : await requireCapability(req, endpoint.capability)
   if (user instanceof Response) return user
 
   const ctx: DashboardRequestContext = {
     timeZone: resolveTimeZone(url.searchParams.get('tz')),
   }
-  const body = await endpoint.reader(db, options, ctx)
+  const body = await endpoint.reader(options, ctx)
   return jsonResponse(body)
 }

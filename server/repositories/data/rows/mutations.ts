@@ -9,10 +9,9 @@
  *   updateDataRowStatus  — flip between draft / unpublished
  *   updateDataRowAuthor  — reassign the author user id
  *
- * Convex port: thin adapters over `convex/dataRows.ts`. The signatures are
- * frozen — the leading SQL `DbClient` handle is retained (named `_db`,
- * intentionally unused). Each hydrated read/write returns a joined row that
- * `mapRow` (→ the shared `userRefAt`) turns into a `DataRow`. Soft-delete is
+ * Convex port: thin adapters over `convex/dataRows.ts`. Each hydrated read/write
+ * returns a joined row that `mapRow` (→ the shared `userRefAt`) turns into a
+ * `DataRow`. Soft-delete is
  * the exception: it returns the narrow `DeletedRowSummary` directly (a
  * soft-deleted row carries no hydrated user refs).
  *
@@ -20,7 +19,6 @@
  * Bun side and runs AFTER the Convex mutation — it touches the server's
  * in-memory publish state, not the database.
  */
-import type { DbClient } from '../../../db/client'
 import type { DataRow, DeletedRowSummary } from '@core/data/schemas'
 import { bumpPublishVersionSerialized } from '../../../publish/publishState'
 import { api, getConvex } from '../../../convex/client'
@@ -31,7 +29,6 @@ type UpdateDataRowTableResult =
   | { ok: false; reason: 'row_not_found' | 'table_not_found' | 'slug_conflict' }
 
 export async function createDataRow(
-  _db: DbClient,
   input: InsertDataRowInput,
   actorUserId: string | null = null,
   pluginActorId: string | null = null,
@@ -49,7 +46,6 @@ export async function createDataRow(
 }
 
 export async function saveDataRowDraft(
-  _db: DbClient,
   rowId: string,
   input: UpdateDataRowDraftInput,
   actorUserId: string | null = null,
@@ -71,7 +67,6 @@ export async function saveDataRowDraft(
  * row matched.
  */
 export async function updateDataRowDraftCells(
-  _db: DbClient,
   rowId: string,
   input: UpdateDataRowDraftInput,
   actorUserId: string | null = null,
@@ -93,7 +88,6 @@ export async function updateDataRowDraftCells(
  * be a hydrated `DataRow`.
  */
 export async function softDeleteDataRow(
-  _db: DbClient,
   rowId: string,
   actorUserId: string | null = null,
 ): Promise<DeletedRowSummary | null> {
@@ -108,7 +102,6 @@ export async function softDeleteDataRow(
  * is invalidated AFTER the move commits.
  */
 export async function updateDataRowTable(
-  _db: DbClient,
   rowId: string,
   tableId: string,
   actorUserId: string | null = null,
@@ -129,7 +122,6 @@ export async function updateDataRowTable(
  * Always clears publish and schedule metadata.
  */
 export async function updateDataRowStatus(
-  _db: DbClient,
   rowId: string,
   status: 'draft' | 'unpublished',
   actorUserId: string | null = null,
@@ -146,7 +138,6 @@ export async function updateDataRowStatus(
 }
 
 export async function updateDataRowAuthor(
-  _db: DbClient,
   rowId: string,
   authorUserId: string,
   actorUserId: string | null = null,

@@ -74,43 +74,13 @@ export type LoopItem = Static<typeof LoopItemSchema>
 // ---------------------------------------------------------------------------
 
 /**
- * Tagged-template SQL surface used by source fetch implementations.
- *
- * Mirrors the essential subset of the server-side `DbClient` (kept in
- * `server/db/client.ts`) so `src/core/loops/` stays free of server-only
- * imports. The publisher passes the real `DbClient` at runtime; it is
- * structurally compatible with this interface.
- *
- * `unsafe` + `dialect` are included so sources can build dialect-aware
- * dynamic SQL (e.g. batched IN-lists) without reaching into the server
- * module tree.
- */
-export interface LoopSourceDb {
-  <Row = Record<string, unknown>>(
-    strings: TemplateStringsArray,
-    ...values: unknown[]
-  ): Promise<{ rows: Row[]; rowCount: number }>
-  /**
-   * Execute a raw SQL string with positional parameters.
-   * Use `dialect` to emit the correct placeholder style:
-   *   postgres → $1, $2, …   sqlite → ?, ?, …
-   */
-  unsafe<Row = Record<string, unknown>>(
-    sql: string,
-    params?: unknown[],
-  ): Promise<{ rows: Row[]; rowCount: number }>
-  readonly dialect: 'postgres' | 'sqlite'
-}
-
-/**
  * Context handed to `LoopEntitySource.fetch()` server-side.
  *
- * `db` is the per-request DB connection — Postgres or SQLite. Sources
- * MUST write only ANSI-standard SQL that works on both engines per the
- * rules in CLAUDE.md.
+ * Data access is NOT on this context — the built-in sources reach Convex
+ * through the injected `@core/loops/dataAdapter` port (filled at server boot),
+ * keeping `src/core/loops/` free of server-only imports.
  */
 export interface SourceFetchContext {
-  db: LoopSourceDb
   site: SiteDocument
   /** Source-specific filter values, validated against `filterSchema`. */
   filters: Record<string, unknown>

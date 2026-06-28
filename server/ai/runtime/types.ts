@@ -98,7 +98,7 @@ export interface AiTool {
   readonly inputSchema: TSchema
   /**
    * Does this tool mutate state? Read tools (snapshot, search, list) are
-   * pure reads against the db / store; write tools (insertHtml,
+   * pure reads against the store; write tools (insertHtml,
    * replaceNodeHtml, deleteNode, …) cause user-visible state change.
    *
    * The chat handler uses this to filter the registered toolset: a caller
@@ -132,8 +132,6 @@ export interface AiTool {
  * the top of their handler — the runtime is scope-agnostic.
  */
 export interface ToolContext {
-  /** Database client — server-side tool handlers query through this. */
-  readonly db: import('../../db/client').DbClient
   readonly userId: string
   /** The caller's capability set — handlers and the re-check gate read this. */
   readonly capabilities: readonly CoreCapability[]

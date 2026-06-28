@@ -26,7 +26,6 @@
  * `<uploadsDir>/<originalStem>-w<width>.webp`. The dispatch step is
  * adapter-agnostic; this module never touches the filesystem directly.
  */
-import type { DbClient } from '../../db/client'
 import { dispatchDelete, dispatchUpload } from './mediaUploadDispatch'
 import { getElectedVariantDelegate, type ElectedVariantDelegate } from '../../repositories/mediaStorageAdapters'
 import { runImageVariantJob, isImageVariantOk } from './imageVariantWorkerHost'
@@ -112,7 +111,6 @@ function variantStorageBase(storagePath: string): string {
  * encode entirely when a Tier-3 delegate is taking over the ladder.
  */
 export async function processImageVariants(
-  db: DbClient,
   bytes: Uint8Array,
   /** storagePath of the parent original — used to derive variant filenames. */
   parentStoragePath: string,
@@ -123,7 +121,7 @@ export async function processImageVariants(
     // generates variants on demand at the CDN edge, so local generation
     // would race + double-write. The worker still produces metadata +
     // BlurHash in either case.
-    const delegate = await getElectedVariantDelegate(db)
+    const delegate = await getElectedVariantDelegate()
 
     // Copy the source bytes into a fresh ArrayBuffer the worker can take
     // ownership of via transfer — keeps the caller's `Uint8Array` view intact.
@@ -168,7 +166,7 @@ export async function processImageVariants(
     for (const v of response.variants) {
       const suggested = `${base}-w${v.width}.webp`
       const variantBytes = new Uint8Array(v.bytes)
-      const dispatched = await dispatchUpload(db, {
+      const dispatched = await dispatchUpload({
         bytes: variantBytes,
         mimeType: 'image/webp',
         suggestedStoragePath: suggested,

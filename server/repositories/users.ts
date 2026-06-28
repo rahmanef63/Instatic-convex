@@ -2,11 +2,7 @@
  * Users / identity repository.
  *
  * Convex port: the read/write bodies are now thin adapters over
- * `convex/users.ts` (docs/CONVEX-MIGRATION.md §2). The exported signatures are
- * frozen — the leading SQL `DbClient` handle is retained (named `_db`,
- * intentionally unused) so handlers keep calling these unchanged while the rest
- * of the runtime is still on the SQL path; it is dropped wholesale when
- * `server/db/*` is retired (§7).
+ * `convex/users.ts` (docs/CONVEX-MIGRATION.md §2).
  *
  * What stays here, on the Bun side:
  * - **`rowToUser`** — the single hydration mapper. The Convex functions return
@@ -41,7 +37,6 @@ import {
 } from '../auth/totpSecrets'
 import type { UserRow, UserStatus } from '../types'
 import { Type, filterArray } from '@core/utils/typeboxHelpers'
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 
 interface UserRole {
@@ -95,10 +90,9 @@ export interface JoinedUserRow extends UserRow {
 
 /**
  * The full user + role + avatar column list, defined exactly once. The session
- * lookup in `server/auth/sessions.ts` (still on the SQL path) splices this into
- * a `db.unsafe()` SELECT so the user, role, and avatar columns live in a single
- * place. The users repository itself no longer issues SQL — its reads go
- * through `convex/users.ts`, which returns the same `JoinedUserRow` shape — but
+ * lookup in `server/auth/sessions.ts` splices this into a SELECT so the user,
+ * role, and avatar columns live in a single place. The users repository's reads
+ * go through `convex/users.ts`, which returns the same `JoinedUserRow` shape —
  * the constant stays exported until the session domain is ported too.
  */
 export const USER_JOINED_COLUMNS = `users.id,
@@ -266,17 +260,17 @@ export function toPublicUser(user: AuthUser): CmsUser {
   }
 }
 
-export async function listUsers(_db: DbClient): Promise<CmsUser[]> {
+export async function listUsers(): Promise<CmsUser[]> {
   const rows = await getConvex().query(api.users.list, {})
   return rows.map(publicUserFromWire)
 }
 
-export async function findUserById(_db: DbClient, userId: string): Promise<AuthUser | null> {
+export async function findUserById(userId: string): Promise<AuthUser | null> {
   const row = await getConvex().query(api.users.findById, { userId })
   return row ? authUserFromWire(row) : null
 }
 
-export async function findUserByEmail(_db: DbClient, email: string): Promise<AuthUser | null> {
+export async function findUserByEmail(email: string): Promise<AuthUser | null> {
   const row = await getConvex().query(api.users.findByEmail, {
     emailNormalized: normalizeEmail(email),
   })
@@ -284,7 +278,6 @@ export async function findUserByEmail(_db: DbClient, email: string): Promise<Aut
 }
 
 export async function createUser(
-  _db: DbClient,
   input: {
     id?: string
     email: string
@@ -318,7 +311,6 @@ export async function createUser(
 }
 
 export async function updateUser(
-  _db: DbClient,
   userId: string,
   input: {
     email?: string
@@ -328,7 +320,7 @@ export async function updateUser(
     roleId?: string
   },
 ): Promise<CmsUser | null> {
-  const current = await findUserById(_db, userId)
+  const current = await findUserById(userId)
   if (!current) return null
 
   const email = input.email === undefined ? current.email : input.email.trim()
@@ -363,7 +355,6 @@ export async function updateUser(
  * the target row is missing/soft-deleted.
  */
 export async function setUserAvatarMediaId(
-  _db: DbClient,
   userId: string,
   mediaId: string | null,
 ): Promise<CmsUser | null> {
@@ -372,7 +363,6 @@ export async function setUserAvatarMediaId(
 }
 
 export async function updateUserPasswordHash(
-  _db: DbClient,
   userId: string,
   passwordHash: string,
 ): Promise<CmsUser | null> {
@@ -384,7 +374,6 @@ export async function updateUserPasswordHash(
 }
 
 export async function enableUserTotpMfa(
-  _db: DbClient,
   userId: string,
   input: {
     secret: string
@@ -403,7 +392,6 @@ export async function enableUserTotpMfa(
 }
 
 export async function disableUserTotpMfa(
-  _db: DbClient,
   userId: string,
 ): Promise<CmsUser | null> {
   const row = await getConvex().mutation(api.users.disableTotpMfa, { userId })
@@ -411,7 +399,6 @@ export async function disableUserTotpMfa(
 }
 
 export async function replaceUserRecoveryCodeHashes(
-  _db: DbClient,
   userId: string,
   recoveryCodeHashes: string[],
 ): Promise<CmsUser | null> {
@@ -423,7 +410,6 @@ export async function replaceUserRecoveryCodeHashes(
 }
 
 export async function updateUserStepUpPolicy(
-  _db: DbClient,
   userId: string,
   input: {
     mode: StepUpAuthMode
@@ -439,22 +425,21 @@ export async function updateUserStepUpPolicy(
 }
 
 export async function consumeUserRecoveryCodeHash(
-  _db: DbClient,
   userId: string,
   usedHash: string,
 ): Promise<boolean> {
   return getConvex().mutation(api.users.consumeRecoveryCodeHash, { userId, usedHash })
 }
 
-export async function softDeleteUser(_db: DbClient, userId: string): Promise<boolean> {
+export async function softDeleteUser(userId: string): Promise<boolean> {
   return getConvex().mutation(api.users.softDelete, { userId })
 }
 
-export async function countActiveOwners(_db: DbClient): Promise<number> {
+export async function countActiveOwners(): Promise<number> {
   return getConvex().query(api.users.countActiveOwners, {})
 }
 
-export async function markUserLoggedIn(_db: DbClient, userId: string): Promise<void> {
+export async function markUserLoggedIn(userId: string): Promise<void> {
   await getConvex().mutation(api.users.markLoggedIn, { userId })
 }
 
@@ -467,7 +452,6 @@ export async function markUserLoggedIn(_db: DbClient, userId: string): Promise<v
  * responsible for not double-counting (one call per failed attempt).
  */
 export async function recordFailedLoginAttempt(
-  _db: DbClient,
   userId: string,
   lockedUntil: Date | null,
 ): Promise<{ failedLoginCount: number; lockedUntil: string | null } | null> {

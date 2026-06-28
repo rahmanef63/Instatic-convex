@@ -11,7 +11,6 @@ import { Type } from '@core/utils/typeboxHelpers'
 import { getErrorMessage } from '@core/utils/errorMessage'
 import { jsonResponse, readValidatedBody, badRequest } from '../../http'
 import { requireCapability } from '../../auth/authz'
-import type { DbClient } from '../../db/client'
 import { createAuditEvent } from '../../repositories/audit'
 import {
   CredentialError,
@@ -65,19 +64,18 @@ const UpdateBodySchema = Type.Object({
 
 export function tryHandleAiCredentials(
   req: Request,
-  db: DbClient,
   pathname: string,
 ): Promise<Response> | null {
   if (pathname === '/admin/api/ai/credentials') {
-    return dispatchCollection(req, db)
+    return dispatchCollection(req)
   }
   const idMatch = pathname.match(/^\/admin\/api\/ai\/credentials\/([^/]+)$/)
   if (idMatch) {
-    return dispatchItem(req, db, idMatch[1]!)
+    return dispatchItem(req, idMatch[1]!)
   }
   const testMatch = pathname.match(/^\/admin\/api\/ai\/credentials\/([^/]+)\/test$/)
   if (testMatch) {
-    return dispatchTest(req, db, testMatch[1]!)
+    return dispatchTest(req, testMatch[1]!)
   }
   return null
 }
@@ -86,30 +84,30 @@ export function tryHandleAiCredentials(
 // Collection: GET (list) + POST (create)
 // ---------------------------------------------------------------------------
 
-async function dispatchCollection(req: Request, db: DbClient): Promise<Response> {
-  if (req.method === 'GET') return handleList(req, db)
-  if (req.method === 'POST') return handleCreate(req, db)
+async function dispatchCollection(req: Request): Promise<Response> {
+  if (req.method === 'GET') return handleList(req)
+  if (req.method === 'POST') return handleCreate(req)
   return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 }
 
-async function handleList(req: Request, db: DbClient): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+async function handleList(req: Request): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
-  const records = await listCredentialsForUser(db, userOrResponse.id)
+  const records = await listCredentialsForUser(userOrResponse.id)
   const views = await Promise.all(records.map(toCredentialView))
   return jsonResponse({ credentials: views })
 }
 
-async function handleCreate(req: Request, db: DbClient): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+async function handleCreate(req: Request): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const body = await readValidatedBody(req, CreateBodySchema)
   if (!body) return badRequest('Invalid request body.')
 
   try {
-    const record = await createCredentialForUser(db, userOrResponse.id, body)
-    await createAuditEvent(db, {
+    const record = await createCredentialForUser(userOrResponse.id, body)
+    await createAuditEvent({
       actorUserId: userOrResponse.id,
       action: 'ai.credential.created',
       targetType: 'ai_credential',
@@ -124,7 +122,7 @@ async function handleCreate(req: Request, db: DbClient): Promise<Response> {
     // credential. Never overwrites an existing choice; failures here must not
     // fail credential creation.
     try {
-      await seedEmptyDefaults(db, record, userOrResponse.id)
+      await seedEmptyDefaults(record, userOrResponse.id)
     } catch (err) {
       console.warn(
         '[ai/credentials] auto-default skipped - default seeding failed:',
@@ -155,11 +153,10 @@ async function handleCreate(req: Request, db: DbClient): Promise<Response> {
  * (offline, bad key) we simply skip seeding rather than fail the create.
  */
 async function seedEmptyDefaults(
-  db: DbClient,
   record: CredentialRecord,
   userId: string,
 ): Promise<void> {
-  const existing = await listDefaults(db)
+  const existing = await listDefaults()
   const filled = new Set(existing.map((d) => d.scope))
   const emptyScopes = ALL_SCOPES.filter((scope) => !filled.has(scope))
   if (emptyScopes.length === 0) return
@@ -189,8 +186,8 @@ async function seedEmptyDefaults(
   }
 
   for (const scope of emptyScopes) {
-    await setDefaultForScope(db, scope, record.id, topModelId, userId)
-    await createAuditEvent(db, {
+    await setDefaultForScope(scope, record.id, topModelId, userId)
+    await createAuditEvent({
       actorUserId: userId,
       action: 'ai.default.updated',
       targetType: 'ai_default',
@@ -204,23 +201,23 @@ async function seedEmptyDefaults(
 // Item: PUT (update) + DELETE
 // ---------------------------------------------------------------------------
 
-async function dispatchItem(req: Request, db: DbClient, id: string): Promise<Response> {
-  if (req.method === 'PUT') return handleUpdate(req, db, id)
-  if (req.method === 'DELETE') return handleDelete(req, db, id)
+async function dispatchItem(req: Request, id: string): Promise<Response> {
+  if (req.method === 'PUT') return handleUpdate(req, id)
+  if (req.method === 'DELETE') return handleDelete(req, id)
   return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
 }
 
-async function handleUpdate(req: Request, db: DbClient, id: string): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+async function handleUpdate(req: Request, id: string): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const body = await readValidatedBody(req, UpdateBodySchema)
   if (!body) return badRequest('Invalid request body.')
 
   try {
-    const record = await updateCredentialForUser(db, userOrResponse.id, id, body)
+    const record = await updateCredentialForUser(userOrResponse.id, id, body)
     if (!record) return jsonResponse({ error: 'Credential not found' }, { status: 404 })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: userOrResponse.id,
       action: 'ai.credential.updated',
       targetType: 'ai_credential',
@@ -246,19 +243,19 @@ async function handleUpdate(req: Request, db: DbClient, id: string): Promise<Res
   }
 }
 
-async function handleDelete(req: Request, db: DbClient, id: string): Promise<Response> {
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+async function handleDelete(req: Request, id: string): Promise<Response> {
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
 
   // Snapshot identity BEFORE the delete so the audit row carries provider +
   // label even though the row no longer exists post-commit.
-  const snapshot = await readCredentialForUser(db, userOrResponse.id, id)
+  const snapshot = await readCredentialForUser(userOrResponse.id, id)
 
   try {
-    const deleted = await deleteCredentialForUser(db, userOrResponse.id, id)
+    const deleted = await deleteCredentialForUser(userOrResponse.id, id)
     if (!deleted) return jsonResponse({ error: 'Credential not found' }, { status: 404 })
     if (snapshot) {
-      await createAuditEvent(db, {
+      await createAuditEvent({
         actorUserId: userOrResponse.id,
         action: 'ai.credential.deleted',
         targetType: 'ai_credential',
@@ -283,14 +280,14 @@ async function handleDelete(req: Request, db: DbClient, id: string): Promise<Res
 // Test: POST /admin/api/ai/credentials/:id/test
 // ---------------------------------------------------------------------------
 
-async function dispatchTest(req: Request, db: DbClient, id: string): Promise<Response> {
+async function dispatchTest(req: Request, id: string): Promise<Response> {
   if (req.method !== 'POST') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
-  const userOrResponse = await requireCapability(req, db, 'ai.providers.manage')
+  const userOrResponse = await requireCapability(req, 'ai.providers.manage')
   if (userOrResponse instanceof Response) return userOrResponse
 
-  const record = await readCredentialForUser(db, userOrResponse.id, id)
+  const record = await readCredentialForUser(userOrResponse.id, id)
   if (!record) return jsonResponse({ error: 'Credential not found' }, { status: 404 })
 
   let apiKeyForRedaction: string | null = null
@@ -299,7 +296,7 @@ async function dispatchTest(req: Request, db: DbClient, id: string): Promise<Res
     apiKeyForRedaction = resolved.apiKey
     const driver = resolveDriver(record.providerId)
     const models = await driver.listModels(resolved)
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: userOrResponse.id,
       action: 'ai.credential.tested',
       targetType: 'ai_credential',
@@ -314,7 +311,7 @@ async function dispatchTest(req: Request, db: DbClient, id: string): Promise<Res
     return jsonResponse({ ok: true, modelCount: models.length })
   } catch (err) {
     const message = safeCredentialErrorMessage(err, [apiKeyForRedaction], 'Test failed.')
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: userOrResponse.id,
       action: 'ai.credential.tested',
       targetType: 'ai_credential',

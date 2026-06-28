@@ -13,7 +13,6 @@
  * owns the sequencing, rendering, and disk artefacts. The dependency
  * direction is one-way: publish → repositories, never back.
  */
-import type { DbClient } from '../db/client'
 import type { DataRow, DataRowVersion } from '@core/data/schemas'
 import { resolveTemplateChain } from '@core/templates'
 import {
@@ -37,7 +36,6 @@ export interface PublishDataRowResult {
 }
 
 export async function publishDataRow(
-  db: DbClient,
   rowId: string,
   /**
    * The user attributed as the publisher. `null` is allowed for system
@@ -49,16 +47,15 @@ export async function publishDataRow(
 ): Promise<PublishDataRowResult> {
   // Serialize against every other publish so the version read→bake→bump window
   // can't interleave and mis-stamp baked hole shells (ISS-038).
-  return withPublishLock(() => publishDataRowLocked(db, rowId, publisherUserId, uploadsDir))
+  return withPublishLock(() => publishDataRowLocked(rowId, publisherUserId, uploadsDir))
 }
 
 async function publishDataRowLocked(
-  db: DbClient,
   rowId: string,
   publisherUserId: string | null,
   uploadsDir?: string,
 ): Promise<PublishDataRowResult> {
-  const { row, version, previousRoute } = await persistDataRowPublish(db, rowId, publisherUserId)
+  const { row, version, previousRoute } = await persistDataRowPublish(rowId, publisherUserId)
 
   // Layer A: incremental artefact update outside the transaction.
   // Disk artefacts are derived state — errors are logged but do not fail
@@ -68,7 +65,7 @@ async function publishDataRowLocked(
     // synchronous statement right after this await resolves, so a hole-shell
     // baked here carries the version that becomes current with no gap.
     const nextPublishVersion = getPublishVersion() + 1
-    await writeDataRowArtefact(db, uploadsDir, row, previousRoute, nextPublishVersion).catch((err) => {
+    await writeDataRowArtefact(uploadsDir, row, previousRoute, nextPublishVersion).catch((err) => {
       console.error('[publish:row] static artefact write failed (live renderer remains active):', err)
     })
   }
@@ -96,13 +93,12 @@ async function publishDataRowLocked(
  *      artefact into the active slot.
  */
 async function writeDataRowArtefact(
-  db: DbClient,
   uploadsDir: string,
   publishedRow: DataRow,
   previousRoute: PreviousPublishedRoute | null,
   publishVersion: number,
 ): Promise<void> {
-  const tableInfo = await getRowTableRouteInfo(db, publishedRow.id)
+  const tableInfo = await getRowTableRouteInfo(publishedRow.id)
   if (!tableInfo) return
 
   // Remove old artefact when the slug changed (old URL is now stale).
@@ -115,26 +111,25 @@ async function writeDataRowArtefact(
 
   // Resolve the full template chain for this row's table (everywhere layout +
   // entry template). No chain → no entry route to bake.
-  const siteSnapshot = await getLatestPublishedSiteSnapshot(db)
+  const siteSnapshot = await getLatestPublishedSiteSnapshot()
   if (!siteSnapshot) return
 
   const chain = resolveTemplateChain(siteSnapshot.site, { kind: 'entry', tableSlug: tableInfo.tableSlug })
   if (chain.length === 0) return
 
   // Fetch the full PublishedDataRow (needed for templateContext + media path).
-  const publishedDataRow = await getPublishedDataRowByRoute(db, tableInfo.tableRouteBase, publishedRow.slug)
+  const publishedDataRow = await getPublishedDataRowByRoute(tableInfo.tableRouteBase, publishedRow.slug)
   if (!publishedDataRow) return
 
   const newPath = publicDataPath(tableInfo.tableRouteBase, publishedRow.slug)
   const syntheticUrl = new URL(`http://localhost${newPath}`)
   const rendered = await renderPublishedDataRowTemplate(siteSnapshot, publishedDataRow, {
-    db,
     url: syntheticUrl,
     publishVersion,
   })
   if (!rendered) return
 
-  const html = await applyPublishedHtmlPipeline(rendered, db)
+  const html = await applyPublishedHtmlPipeline(rendered)
   await updateArtefactInPlace(uploadsDir, newPath, html)
 }
 
@@ -148,12 +143,11 @@ async function writeDataRowArtefact(
  * file is a no-op (removeArtefactInPlace never throws on a missing file).
  */
 export async function removeDataRowArtefact(
-  db: DbClient,
   uploadsDir: string,
   rowId: string,
   slug: string,
 ): Promise<void> {
-  const routeBase = await getRowTableRouteBase(db, rowId)
+  const routeBase = await getRowTableRouteBase(rowId)
   if (routeBase === null) return
   await removeArtefactInPlace(uploadsDir, publicDataPath(routeBase, slug))
 }

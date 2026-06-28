@@ -1,8 +1,8 @@
 /**
  * Content-scope read tools — server-resolved.
  *
- * Seven read tools that hit the data + media + user repositories directly
- * through `ctx.db`. None of them mutate; all results are shape-projected to
+ * Seven read tools that hit the data + media + user repositories directly.
+ * None of them mutate; all results are shape-projected to
  * compact "agent-friendly" rows so we don't blow up the context window with
  * fields the model doesn't need (user join columns, internal timestamps,
  * deleted-at sentinels, etc.).
@@ -131,8 +131,8 @@ const listCollectionsTool: AiTool = {
   description:
     'List every content collection (postType + page tables) with id, slug, label, kind, row count, and primary field id. Use to discover where a document lives before reading/writing.',
   inputSchema: ListCollectionsInput,
-  handler: async (_input, ctx) => {
-    const tables = await listDataTablesWithCounts(ctx.db)
+  handler: async (_input, _ctx) => {
+    const tables = await listDataTablesWithCounts()
     return {
       collections: tables
         .filter((t) => CONTENT_KIND_VISIBLE.has(t.kind))
@@ -157,9 +157,9 @@ const getCollectionSchemaTool: AiTool = {
   description:
     "Return one collection's field schema: each field's id, label, type, required flag, builtIn flag, and per-type extras (select options, media kind, relation target). Call BEFORE set_document_field on an unfamiliar collection so you know the field's value shape.",
   inputSchema: GetCollectionSchemaInput,
-  handler: async (input, ctx) => {
+  handler: async (input, _ctx) => {
     const { tableId } = input as Static<typeof GetCollectionSchemaInput>
-    const tables = await listDataTablesWithCounts(ctx.db)
+    const tables = await listDataTablesWithCounts()
     const table = tables.find((t) => t.id === tableId)
     if (!table) {
       return { ok: false, error: `Collection ${tableId} not found.` }
@@ -199,9 +199,9 @@ const listDocumentsTool: AiTool = {
   description:
     'List documents in one collection. Returns id, title, slug, status, authorUserId, updatedAt — light projection. Filter by status / authorUserId, paginate with limit (default 25, max 200) + offset.',
   inputSchema: ListDocumentsInput,
-  handler: async (input, ctx) => {
+  handler: async (input, _ctx) => {
     const args = input as Static<typeof ListDocumentsInput>
-    const all = await listDataRows(ctx.db, args.tableId)
+    const all = await listDataRows(args.tableId)
     let filtered = all
     if (args.status) filtered = filtered.filter((r) => r.status === args.status)
     if (args.authorUserId) filtered = filtered.filter((r) => r.authorUserId === args.authorUserId)
@@ -233,9 +233,9 @@ const getDocumentTool: AiTool = {
   description:
     "Return one document's full state: every field value (body is a markdown string), status, author, slug, timestamps. Use for the doc the user wants to edit when it isn't the active doc, or to refresh state after another agent action.",
   inputSchema: GetDocumentInput,
-  handler: async (input, ctx) => {
+  handler: async (input, _ctx) => {
     const { documentId } = input as Static<typeof GetDocumentInput>
-    const row = await getDataRow(ctx.db, documentId)
+    const row = await getDataRow(documentId)
     if (!row) {
       return { ok: false, error: `Document ${documentId} not found.` }
     }
@@ -274,11 +274,11 @@ const searchDocumentsTool: AiTool = {
   description:
     "Full-text search across document slugs (the slug is a URL-safe derivative of the title — reliable text proxy for free-text lookup). Returns light summaries (id, tableId, slug, status, updatedAt). `limit` default 25, max 100.",
   inputSchema: SearchDocumentsInput,
-  handler: async (input, ctx) => {
+  handler: async (input, _ctx) => {
     const { query, limit } = input as Static<typeof SearchDocumentsInput>
-    const results = await searchDataRows(ctx.db, query, limit ?? 25)
+    const results = await searchDataRows(query, limit ?? 25)
     // Only surface postType/page rows — `data` tables aren't content.
-    const tables = await listDataTablesWithCounts(ctx.db)
+    const tables = await listDataTablesWithCounts()
     const visibleTableIds = new Set(
       tables.filter((t) => CONTENT_KIND_VISIBLE.has(t.kind)).map((t) => t.id),
     )
@@ -313,8 +313,8 @@ const listUsersTool: AiTool = {
   description:
     'List active users available as document authors (id, email, displayName, roleSlug, roleName). Use to look up an author id before set_document_author.',
   inputSchema: ListUsersInput,
-  handler: async (_input, ctx) => {
-    const users = await listDataAuthorOptions(ctx.db)
+  handler: async (_input, _ctx) => {
+    const users = await listDataAuthorOptions()
     return { users }
   },
 }
@@ -337,9 +337,9 @@ const listMediaTool: AiTool = {
   description:
     "List existing media assets so you can pick one for a media-typed field. Returns id, filename, publicPath, mimeType, altText, width, height. Optional `query` substring-matches filename + altText (case-insensitive); `mimeType` substring-matches the mime (e.g. 'image' to filter to images). `limit` default 25, max 100. You CANNOT upload new media — only assign existing.",
   inputSchema: ListMediaInput,
-  handler: async (input, ctx) => {
+  handler: async (input, _ctx) => {
     const args = input as Static<typeof ListMediaInput>
-    const all = await listMediaAssets(ctx.db)
+    const all = await listMediaAssets()
     const lowerQuery = args.query?.toLowerCase()
     const lowerMime = args.mimeType?.toLowerCase()
     const filtered = all.filter((asset) => {

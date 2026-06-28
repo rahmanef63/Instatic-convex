@@ -27,7 +27,7 @@ interface SystemRoleDefinition {
  * The four built-in system roles.
  *
  * - **Owner** is force-resynced from `CORE_CAPABILITIES` on every boot via
- *   `syncSystemRoles(db)` so adding a new capability never strands an
+ *   `syncSystemRoles()` so adding a new capability never strands an
  *   existing Owner on a stale grant list.
  *
  * - **Admin** is *also* force-resynced from its explicit literal list on

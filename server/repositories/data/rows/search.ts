@@ -10,7 +10,6 @@
  * derivative of the content title, a reliable text proxy without dialect-
  * specific JSON extraction. The effective-owner visibility filter stays here.
  */
-import type { DbClient } from '../../../db/client'
 import type { DataRowStatus } from '@core/data/schemas'
 import { api, getConvex } from '../../../convex/client'
 
@@ -40,7 +39,6 @@ interface SearchDataRowsVisibility {
 }
 
 export async function searchDataRows(
-  _db: DbClient,
   query: string,
   limit: number,
   visibility: SearchDataRowsVisibility = {},

@@ -20,13 +20,7 @@
 import type { Page, SiteDocument } from '@core/page-tree'
 import type { IModuleRegistry } from '@core/module-engine'
 import { walkRenderTree } from './renderTreeWalk'
-import type { DbClient } from '../db/client'
-import type { MediaAsset } from '../repositories/media'
-import {
-  MEDIA_ASSET_COLUMNS,
-  mapMediaAssetRow,
-  type MediaAssetRow,
-} from '../repositories/mediaAssetMapping'
+import { listMediaAssets, type MediaAsset } from '../repositories/media'
 import { materializeAssetMapForClient } from './mediaPresentation'
 
 /** Map keyed by the asset's `public_path` for O(1) lookup at render time. */
@@ -60,39 +54,23 @@ function collectMediaPaths(page: Page, site: SiteDocument, registry: IModuleRegi
  * tree. Returns an empty map for pages that reference no local uploads
  * (purely external URLs, or no media modules at all).
  *
- * One batched IN-query covers all paths regardless of page size.
+ * Resolves through `listMediaAssets` (the active set) and selects the
+ * referenced `publicPath`s in JS — the media library is small enough that
+ * the single Convex round-trip dominates a per-path lookup.
  */
 export async function prefetchMediaAssets(
   page: Page,
   site: SiteDocument,
   registry: IModuleRegistry,
-  db: DbClient,
 ): Promise<MediaAssetMap> {
   const map = new Map<string, MediaAsset>()
   const paths = collectMediaPaths(page, site, registry)
   if (paths.size === 0) return map
 
-  // `collectMediaPaths` already returns a Set, so the paths are unique.
-  const pathsToFetch = [...paths]
-  const placeholders = pathsToFetch.map((_, i) =>
-    db.dialect === 'postgres' ? `$${i + 1}` : '?'
-  ).join(', ')
-  // Bespoke batched-by-`public_path` SELECT (the render path resolves by stored
-  // URL, not asset id, and legitimately skips the folder-id join). It maps
-  // through the SAME canonical `mapMediaAssetRow` as the repository, so the
-  // published page and the admin see one identical asset shape — including
-  // storageAdapterId, externallyHosted, and the variants' storagePath /
-  // storageAdapterId derivation.
-  const { rows } = await db.unsafe<MediaAssetRow>(
-    `select ${MEDIA_ASSET_COLUMNS}
-     from media_assets
-     where public_path in (${placeholders}) and deleted_at is null`,
-    pathsToFetch,
-  )
-  const byPath = new Map(rows.map(r => [r.public_path, r]))
-  for (const path of pathsToFetch) {
-    const row = byPath.get(path)
-    if (row) map.set(path, mapMediaAssetRow(row))
+  const byPath = new Map((await listMediaAssets()).map((asset) => [asset.publicPath, asset]))
+  for (const path of paths) {
+    const asset = byPath.get(path)
+    if (asset) map.set(path, asset)
   }
   // Apply the `media.url.transform` filter chain to every asset's URLs
   // (publicPath + variants[*].path). The map KEY stays the page tree's

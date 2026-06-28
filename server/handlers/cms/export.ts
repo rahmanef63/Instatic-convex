@@ -38,7 +38,6 @@
  */
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { DbClient } from '../../db/client'
 import { requireCapability } from '../../auth/authz'
 import { getDraftSite } from '../../repositories/site'
 import { listDataTables } from '../../repositories/data/tables'
@@ -110,7 +109,6 @@ interface ExportSelection {
 
 export async function handleExportRoute(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions = {},
 ): Promise<Response | null> {
   const url = new URL(req.url)
@@ -121,16 +119,16 @@ export async function handleExportRoute(
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
 
-  const user = await requireCapability(req, db, 'data.export')
+  const user = await requireCapability(req, 'data.export')
   if (user instanceof Response) return user
 
   // Summary — total counts of the non-table export categories, so the dialog
   // can label and disable categories independent of the current selection.
   if (isSummary) {
     const [media, mediaFolders, redirects] = await Promise.all([
-      countMediaAssetsForExport(db),
-      listExportableMediaFolders(db),
-      listExportableRedirects(db),
+      countMediaAssetsForExport(),
+      listExportableMediaFolders(),
+      listExportableRedirects(),
     ])
     return jsonResponse({ media, mediaFolders: mediaFolders.length, redirects: redirects.length })
   }
@@ -170,14 +168,14 @@ export async function handleExportRoute(
   }
 
   // Always load the site shell — needed for sourceSiteName even when includeSite=false
-  const shell = await getDraftSite(db)
+  const shell = await getDraftSite()
   if (!shell) {
     return jsonResponse({ error: 'Site not initialised — run setup before exporting' }, { status: 404 })
   }
 
   // Resolve the table set: all tables for a full export, or just the named ones.
   const selectionByTable = selections ? new Map(selections.map((s) => [s.tableId, s])) : null
-  let tables = await listDataTables(db)
+  let tables = await listDataTables()
   if (selectionByTable) {
     tables = tables.filter((t) => selectionByTable.has(t.id))
   }
@@ -190,7 +188,7 @@ export async function handleExportRoute(
   const visibility = canSeeAllDataRows(user) ? {} : { ownerUserId: user.id }
   const rowsPerTable = await Promise.all(
     tables.map(async (table) => {
-      const all = await listDataRows(db, table.id, visibility)
+      const all = await listDataRows(table.id, visibility)
       const sel = selectionByTable?.get(table.id)
       if (!sel?.rowIds) return all
       const want = new Set(sel.rowIds)
@@ -200,7 +198,7 @@ export async function handleExportRoute(
   const rows = rowsPerTable.flat()
 
   // Media folder tree — cheap; gather whenever requested.
-  const mediaFolders = includeMediaFolders ? await listExportableMediaFolders(db) : undefined
+  const mediaFolders = includeMediaFolders ? await listExportableMediaFolders() : undefined
 
   // Redirects — keep the bundle self-consistent: only include redirects whose
   // table AND target row are part of this export, so the import can restore
@@ -209,7 +207,7 @@ export async function handleExportRoute(
   if (includeRedirects) {
     const selectedTableIds = new Set(tables.map((t) => t.id))
     const selectedRowIds = new Set(rows.map((r) => r.id))
-    const all = await listExportableRedirects(db)
+    const all = await listExportableRedirects()
     redirects = all.filter(
       (r) => selectedTableIds.has(r.tableId) && selectedRowIds.has(r.targetRowId),
     )
@@ -228,7 +226,7 @@ export async function handleExportRoute(
   // Media is embedded only when requested AND an uploads dir is configured —
   // both the estimate and the real export gate on this so they stay in sync.
   const wantMedia = includeMedia && Boolean(options.uploadsDir)
-  const assets = wantMedia ? await listMediaAssetsForExport(db) : []
+  const assets = wantMedia ? await listMediaAssetsForExport() : []
   const archiveAssets = wantMedia && options.uploadsDir
     ? await resolveArchiveAssets(assets, options.uploadsDir)
     : []

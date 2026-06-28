@@ -8,12 +8,9 @@
  * The publish-scheduler tick (`server/publish/publishScheduler.ts`) polls
  * `listDuePublishSchedules` and calls the regular publish path on each result.
  *
- * Convex port: thin adapters over `convex/dataRows.ts`. The signatures are
- * frozen — the leading SQL `DbClient` handle is retained (named `_db`,
- * intentionally unused). The two mutations return a joined row that `mapRow`
- * turns into a `DataRow`.
+ * Convex port: thin adapters over `convex/dataRows.ts`. The two mutations return
+ * a joined row that `mapRow` turns into a `DataRow`.
  */
-import type { DbClient } from '../../../db/client'
 import type { DataRow } from '@core/data/schemas'
 import { api, getConvex } from '../../../convex/client'
 import { mapRow } from './mapper'
@@ -26,7 +23,6 @@ import { mapRow } from './mapper'
  * tick actually publishes the row).
  */
 export async function scheduleDataRowPublish(
-  _db: DbClient,
   rowId: string,
   whenIso: string,
   actorUserId: string | null = null,
@@ -45,7 +41,6 @@ export async function scheduleDataRowPublish(
  * handler (a failed publish attempt falls back to draft).
  */
 export async function cancelScheduledPublish(
-  _db: DbClient,
   rowId: string,
   actorUserId: string | null = null,
 ): Promise<DataRow | null> {
@@ -74,7 +69,6 @@ interface DueScheduledRow {
  * one instance ticks at a time.
  */
 export async function listDuePublishSchedules(
-  _db: DbClient,
   nowIso: string,
   limit: number,
 ): Promise<DueScheduledRow[]> {

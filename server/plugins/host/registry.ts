@@ -4,13 +4,8 @@
  * `hostPlugins` is the source of truth for what the main process knows about
  * each active plugin: routes, hook registrations, loop sources, media
  * adapters, and in-flight fetches. All dispatch paths read from here.
- *
- * `dbForApi` is injected by the server startup sequence once the database
- * client is ready, so api-call dispatch can reach repositories without
- * importing the db client at module load time.
  */
 
-import type { DbClient } from '../../db/client'
 import type { PluginManifest, PluginPermission } from '@core/plugin-sdk'
 import type { ContentAccessMode } from '@core/plugin-sdk/contentSchemas'
 import type { HostPluginRecord } from './types'
@@ -56,14 +51,4 @@ export function assertContentTableAccess(
       `Plugin "${entry.manifest.id}" has contentAccess for table "${tableSlug}" but not for mode "${mode}"`,
     )
   }
-}
-
-let dbForApi: DbClient | null = null
-
-export function setPluginWorkerDbClient(db: DbClient): void {
-  dbForApi = db
-}
-
-export function getDbForApi(): DbClient | null {
-  return dbForApi
 }

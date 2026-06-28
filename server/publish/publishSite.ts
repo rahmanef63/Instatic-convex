@@ -23,7 +23,6 @@ import type { PublishedRuntimePackageImportmap, SiteCssBundle } from '@core/publ
 import { normalizeSiteRuntimeConfig } from '@core/site-runtime'
 import { registry } from '@core/module-engine'
 import { isTemplatePage, resolveNotFoundTemplate } from '@core/templates'
-import type { DbClient } from '../db/client'
 import { nextDataRowVersionNumber } from '../repositories/data'
 import {
   getDraftSiteDocument,
@@ -76,17 +75,15 @@ function createSnapshot(
 }
 
 export async function publishDraftSite(
-  db: DbClient,
   adminUserId: string,
   uploadsDir?: string,
 ): Promise<PublishResult> {
   // Serialize against every other publish so the version read→bake→bump window
   // can't interleave and mis-stamp baked hole shells (ISS-038).
-  return withPublishLock(() => publishDraftSiteLocked(db, adminUserId, uploadsDir))
+  return withPublishLock(() => publishDraftSiteLocked(adminUserId, uploadsDir))
 }
 
 async function publishDraftSiteLocked(
-  db: DbClient,
   adminUserId: string,
   uploadsDir?: string,
 ): Promise<PublishResult> {
@@ -97,7 +94,7 @@ async function publishDraftSiteLocked(
   // write (autosaves, row publishes) behind it. `withPublishLock` already
   // serializes publishes, and version numbers are only allocated by publish
   // paths under that same lock, so reading outside the transaction is stable.
-  const site = await getDraftSiteDocument(db)
+  const site = await getDraftSiteDocument()
   if (!site) throw new Error('draft site not found')
 
   const runtime = normalizeSiteRuntimeConfig(site.runtime)
@@ -133,7 +130,7 @@ async function publishDraftSiteLocked(
   const runtimeAssetFiles: Array<{ publicPath: string; bytes: Uint8Array }> = []
   const pageWrites: PublishedPageVersionWrite[] = []
   for (const page of publishedSite.pages) {
-    const versionNumber = await nextDataRowVersionNumber(db, page.id)
+    const versionNumber = await nextDataRowVersionNumber(page.id)
     const versionId = nanoid()
     const runtimeBuild = await buildSiteRuntimeScripts({
       site: publishedSite,
@@ -169,7 +166,7 @@ async function publishDraftSiteLocked(
   }
 
   // ── Phase 2: short transaction — DB writes only ───────────────────────────
-  await persistSitePublish(db, {
+  await persistSitePublish({
     siteSnapshotId,
     site: publishedSite,
     serializedImportmap: serializedImportmap
@@ -239,12 +236,11 @@ async function publishDraftSiteLocked(
       if (notFoundSnapshot) {
         try {
           const rendered = await renderPublishedNotFound(notFoundSnapshot, {
-            db,
             url: new URL(`http://localhost${NOT_FOUND_ARTEFACT_URL_PATH}`),
             publishVersion: nextPublishVersion,
           })
           if (rendered) {
-            const html = await applyPublishedHtmlPipeline(rendered, db)
+            const html = await applyPublishedHtmlPipeline(rendered)
             await writeArtefact(slotDir, NOT_FOUND_ARTEFACT_URL_PATH, html)
             collectCssFiles(rendered.cssBundle)
           }
@@ -263,11 +259,10 @@ async function publishDraftSiteLocked(
         try {
           const syntheticUrl = new URL(`http://localhost${urlPath}`)
           const rendered = await renderPublishedSnapshot(snapshot, {
-            db,
             url: syntheticUrl,
             publishVersion: nextPublishVersion,
           })
-          const html = await applyPublishedHtmlPipeline(rendered, db)
+          const html = await applyPublishedHtmlPipeline(rendered)
           await writeArtefact(slotDir, urlPath, html)
           // The render's own bundle covers template-composed hashes the raw
           // page bundle above cannot (the merged page's userStyles).
@@ -281,7 +276,7 @@ async function publishDraftSiteLocked(
       // template bakes into the same slot. Without this the slot swap would
       // strand every previously-baked row artefact in the inactive slot and
       // ALL row routes would fall to the live renderer after a full publish.
-      const rowBake = await bakePublishedDataRowArtefacts(db, slotDir, nextPublishVersion)
+      const rowBake = await bakePublishedDataRowArtefacts(slotDir, nextPublishVersion)
       for (const cssBundle of rowBake.cssBundles) collectCssFiles(cssBundle)
 
       for (const [publicPath, bytes] of assetsByPath) {

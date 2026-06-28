@@ -6,7 +6,6 @@
  * surface and share no local state with the login flow.
  */
 
-import type { DbClient } from '../../db/client'
 import {
   listSessionsForUser,
   revokeAllOtherSessions,
@@ -23,11 +22,11 @@ import type { RouteParams } from './routeTable'
  * Sessions tab. The current session is flagged via `isCurrent: true` so the
  * UI can pin it and disable its "Sign out" action.
  */
-export async function handleListSessions(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+export async function handleListSessions(req: Request): Promise<Response> {
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
   const currentSessionHash = await getSessionHash(req)
-  const sessions = await listSessionsForUser(db, user.id, currentSessionHash)
+  const sessions = await listSessionsForUser(user.id, currentSessionHash)
   return jsonResponse({ sessions })
 }
 
@@ -46,12 +45,11 @@ export async function handleListSessions(req: Request, db: DbClient): Promise<Re
  */
 export async function handleRevokeSession(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
-  const stepUp = await requireStepUp(req, db, user)
+  const stepUp = await requireStepUp(req, user)
   if (stepUp) return stepUp
   const targetHash = params.id
   if (!targetHash) return jsonResponse({ error: 'Invalid session id' }, { status: 400 })
@@ -62,9 +60,9 @@ export async function handleRevokeSession(
       { status: 400 },
     )
   }
-  const revoked = await revokeSessionByHashForUser(db, targetHash, user.id)
+  const revoked = await revokeSessionByHashForUser(targetHash, user.id)
   if (!revoked) return jsonResponse({ error: 'Session not found' }, { status: 404 })
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'logout',
     targetType: 'user',
@@ -81,14 +79,14 @@ export async function handleRevokeSession(
  * the action stays signed in. Step-up gated — wholesale device wipe is the
  * highest-blast-radius session action we expose.
  */
-export async function handleLogoutAll(req: Request, db: DbClient): Promise<Response> {
-  const user = await requireAuthenticatedUser(req, db)
+export async function handleLogoutAll(req: Request): Promise<Response> {
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
-  const stepUp = await requireStepUp(req, db, user)
+  const stepUp = await requireStepUp(req, user)
   if (stepUp) return stepUp
   const currentSessionHash = await getSessionHash(req)
-  const revokedCount = await revokeAllOtherSessions(db, user.id, currentSessionHash)
-  await createAuditEvent(db, {
+  const revokedCount = await revokeAllOtherSessions(user.id, currentSessionHash)
+  await createAuditEvent({
     actorUserId: user.id,
     action: 'logout',
     targetType: 'user',

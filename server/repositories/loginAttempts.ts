@@ -14,18 +14,14 @@
  * future change set when audit volume warrants it. Rows are tiny.
  *
  * Convex port: this file is now a thin adapter over `convex/loginAttempts.ts`
- * (see docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged while the rest of the runtime is
- * still on the SQL path; the bodies read/write through the shared `getConvex()`
- * handle instead. It is dropped wholesale when `server/db/*` is retired (§7).
- * All row-shaping and ordering now live in the Convex functions.
+ * (see docs/CONVEX-MIGRATION.md §2). The bodies read/write through the shared
+ * `getConvex()` handle. All row-shaping and ordering now live in the Convex
+ * functions.
  *
  * @see convex/loginAttempts.ts        — the Convex query/mutation functions
  * @see server/auth/lockout.ts         — policy that consumes this
  */
 
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 
 export type LoginAttemptResult =
@@ -48,7 +44,6 @@ interface LoginAttempt {
 }
 
 export async function recordLoginAttempt(
-  _db: DbClient,
   input: {
     emailNorm: string | null
     ipAddress: string | null
@@ -67,7 +62,6 @@ export async function recordLoginAttempt(
 }
 
 export async function listLoginAttemptsForUser(
-  _db: DbClient,
   userId: string,
   limit = 50,
 ): Promise<LoginAttempt[]> {
@@ -90,7 +84,6 @@ export async function listLoginAttemptsForUser(
  * sessions.
  */
 export async function listLoginActivityForUser(
-  _db: DbClient,
   userId: string,
   emailNorm: string,
   limit = 50,
@@ -103,7 +96,6 @@ export async function listLoginActivityForUser(
 }
 
 export async function listLoginAttemptsForIp(
-  _db: DbClient,
   ipAddress: string,
   limit = 50,
 ): Promise<LoginAttempt[]> {

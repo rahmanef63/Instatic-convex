@@ -13,7 +13,6 @@
  * `handleUsersRoutes` is the dispatcher; one function below per URL pattern
  * owns its own method-routing, body-parsing, and audit emission.
  */
-import type { DbClient } from '../../db/client'
 import { hashPassword } from '../../auth/tokens'
 import { getSessionHash, requireCapability, requireStepUp } from '../../auth/authz'
 import type { AuthUser } from '../../repositories/users'
@@ -59,16 +58,15 @@ const UserPatchBodySchema = Type.Partial(Type.Object({
 // ---------------------------------------------------------------------------
 
 async function rejectsLastOwnerRemoval(
-  db: DbClient,
   userId: string,
   next: { roleId?: string; status?: UserStatus; delete?: boolean },
 ): Promise<boolean> {
-  const current = await findUserById(db, userId)
+  const current = await findUserById(userId)
   if (!current) return false
   if (current.role.slug !== 'owner' || current.status !== 'active') return false
   const removesOwnerRole = next.delete || next.roleId !== undefined && next.roleId !== 'owner'
   const deactivatesOwner = next.status !== undefined && next.status !== 'active'
-  return (removesOwnerRole || deactivatesOwner) && await countActiveOwners(db) <= 1
+  return (removesOwnerRole || deactivatesOwner) && await countActiveOwners() <= 1
 }
 
 function rejectsOwnerRoleAssignment(roleId: string | undefined): Response | null {
@@ -96,17 +94,16 @@ function rejectsShortPassword(password: string | undefined): Response | null {
 // Per-route handlers
 // ---------------------------------------------------------------------------
 
-async function handleListUsers(_req: Request, db: DbClient): Promise<Response> {
-  return jsonResponse({ users: await listUsers(db) })
+async function handleListUsers(_req: Request): Promise<Response> {
+  return jsonResponse({ users: await listUsers() })
 }
 
 async function handleCreateUser(
   req: Request,
-  db: DbClient,
   _params: RouteParams,
   actor: AuthUser,
 ): Promise<Response> {
-  const stepUp = await requireStepUp(req, db, actor)
+  const stepUp = await requireStepUp(req, actor)
   if (stepUp) return stepUp
 
   const body = await readValidatedBody(req, UserCreateBodySchema)
@@ -117,14 +114,14 @@ async function handleCreateUser(
   if (ownerRoleError) return ownerRoleError
 
   try {
-    const user = await createUser(db, {
+    const user = await createUser({
       email: body.email,
       displayName: body.displayName ?? body.email,
       passwordHash: await hashPassword(body.password),
       roleId: body.roleId,
       status: body.status,
     })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: actor.id,
       action: 'user.create',
       targetType: 'user',
@@ -140,12 +137,11 @@ async function handleCreateUser(
 
 async function handleUserPatch(
   req: Request,
-  db: DbClient,
   params: RouteParams,
   actor: AuthUser,
 ): Promise<Response> {
   const userId = params.id
-  const stepUp = await requireStepUp(req, db, actor)
+  const stepUp = await requireStepUp(req, actor)
   if (stepUp) return stepUp
 
   const body = await readValidatedBody(req, UserPatchBodySchema)
@@ -154,7 +150,7 @@ async function handleUserPatch(
   const passwordError = rejectsShortPassword(body.password)
   if (passwordError) return passwordError
 
-  const currentUser = await findUserById(db, userId)
+  const currentUser = await findUserById(userId)
   if (!currentUser) return userNotFound()
 
   // The Owner row is identity-anchored: only the Owner themself can mutate
@@ -178,20 +174,20 @@ async function handleUserPatch(
 
   if (
     body.status !== undefined &&
-    (await rejectsLastOwnerRemoval(db, userId, { status: body.status }))
+    (await rejectsLastOwnerRemoval(userId, { status: body.status }))
   ) {
     return jsonResponse({ error: 'Cannot suspend the last active owner' }, { status: 409 })
   }
 
   if (
     body.roleId !== undefined &&
-    (await rejectsLastOwnerRemoval(db, userId, { roleId: body.roleId }))
+    (await rejectsLastOwnerRemoval(userId, { roleId: body.roleId }))
   ) {
     return jsonResponse({ error: 'Cannot remove the last active owner' }, { status: 409 })
   }
 
   try {
-    const user = await updateUser(db, userId, {
+    const user = await updateUser(userId, {
       email: body.email,
       displayName: body.displayName,
       passwordHash: body.password ? await hashPassword(body.password) : undefined,
@@ -201,7 +197,6 @@ async function handleUserPatch(
     if (!user) return userNotFound()
     const revokedSessions = body.password !== undefined
       ? await revokeAllOtherSessions(
-        db,
         userId,
         userId === actor.id ? await getSessionHash(req) : null,
       )
@@ -212,7 +207,7 @@ async function handleUserPatch(
       : body.status === 'suspended'
         ? 'user.suspend'
         : 'user.update'
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: actor.id,
       action,
       targetType: 'user',
@@ -227,7 +222,7 @@ async function handleUserPatch(
     })
 
     if (body.roleId !== undefined) {
-      await createAuditEvent(db, {
+      await createAuditEvent({
         actorUserId: actor.id,
         action: 'role.assign',
         targetType: 'user',
@@ -244,7 +239,6 @@ async function handleUserPatch(
 
 async function handleUserDelete(
   req: Request,
-  db: DbClient,
   params: RouteParams,
   actor: AuthUser,
 ): Promise<Response> {
@@ -252,10 +246,10 @@ async function handleUserDelete(
   // Step-up gate — deleting another user is one of the highest-blast-radius
   // actions in the admin. Capability check (`users.manage`) already ran;
   // this enforces a fresh password re-entry on top.
-  const stepUp = await requireStepUp(req, db, actor)
+  const stepUp = await requireStepUp(req, actor)
   if (stepUp) return stepUp
 
-  const target = await findUserById(db, userId)
+  const target = await findUserById(userId)
   if (!target) return userNotFound()
 
   // Symmetric to the PATCH guard: only the Owner themself can delete the
@@ -266,14 +260,14 @@ async function handleUserDelete(
     return jsonResponse({ error: 'Only the owner can delete the owner account' }, { status: 403 })
   }
 
-  if (await rejectsLastOwnerRemoval(db, userId, { delete: true })) {
+  if (await rejectsLastOwnerRemoval(userId, { delete: true })) {
     return jsonResponse({ error: 'Cannot delete the last active owner' }, { status: 409 })
   }
 
-  const deleted = await softDeleteUser(db, userId)
+  const deleted = await softDeleteUser(userId)
   if (!deleted) return userNotFound()
 
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: actor.id,
     action: 'user.delete',
     targetType: 'user',
@@ -309,7 +303,7 @@ const USERS_ROUTES: readonly Route<[AuthUser]>[] = [
   },
 ]
 
-export async function handleUsersRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handleUsersRoutes(req: Request): Promise<Response | null> {
   const { pathname } = new URL(req.url)
 
   // Cheap prefix gate: only pay for the `users.manage` capability lookup on
@@ -318,8 +312,8 @@ export async function handleUsersRoutes(req: Request, db: DbClient): Promise<Res
     return null
   }
 
-  const actor = await requireCapability(req, db, 'users.manage')
+  const actor = await requireCapability(req, 'users.manage')
   if (actor instanceof Response) return actor
 
-  return runRouteTable(req, db, USERS_ROUTES, actor)
+  return runRouteTable(req, USERS_ROUTES, actor)
 }

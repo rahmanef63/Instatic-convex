@@ -12,17 +12,12 @@
  * pulling the user from the cookie before calling these.
  *
  * Convex port: this file is now a thin adapter over `convex/sessions.ts`
- * (see docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
- * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
- * so handlers keep calling these unchanged while the rest of the runtime is
- * still on the SQL path; the bodies read/write through the shared `getConvex()`
- * handle instead. It is dropped wholesale when `server/db/*` is retired (§7).
- * All row-shaping, ordering, and the cross-user guard now live in the Convex
- * functions.
+ * (see docs/CONVEX-MIGRATION.md §2). The bodies read/write through the shared
+ * `getConvex()` handle. All row-shaping, ordering, and the cross-user guard now
+ * live in the Convex functions.
  *
  * @see convex/sessions.ts — the Convex query/mutation functions
  */
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 
 interface SessionListItem {
@@ -45,7 +40,6 @@ interface SessionListItem {
  * device list and disable the "Sign out" action on it.
  */
 export async function listSessionsForUser(
-  _db: DbClient,
   userId: string,
   currentSessionHash: string | null,
   now: Date = new Date(),
@@ -67,7 +61,6 @@ export async function listSessionsForUser(
  * revoked, expired, belongs to another user, or doesn't exist).
  */
 export async function revokeSessionByHashForUser(
-  _db: DbClient,
   sessionHash: string,
   userId: string,
 ): Promise<boolean> {
@@ -89,7 +82,6 @@ export async function revokeSessionByHashForUser(
  * Returns the number of sessions revoked.
  */
 export async function revokeAllOtherSessions(
-  _db: DbClient,
   userId: string,
   keepSessionHash: string | null,
 ): Promise<number> {

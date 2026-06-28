@@ -10,18 +10,6 @@ function read(path: string): string {
 }
 
 describe('Single-install CMS architecture', () => {
-  it('keeps the CMS database single-site instead of tenant-scoped', () => {
-    const pg = read('server/db/migrations-pg.ts')
-    const sqlite = read('server/db/migrations-sqlite.ts')
-
-    for (const src of [pg, sqlite]) {
-      expect(src).toContain('create table if not exists site')
-      expect(src).not.toMatch(/\bcreate table\s+if not exists\s+sites\b/i)
-      expect(src).not.toMatch(/\buser_site_/)
-      expect(src).not.toMatch(/\bsite_id\b/)
-    }
-  })
-
   it('does not keep runtime tenant or CMS-internal multi-site identifiers', () => {
     const forbidden = [
       /\btenant_id\b/i,

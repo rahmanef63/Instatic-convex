@@ -27,7 +27,6 @@
  * round-trip through a second validation layer on the server. The adapter
  * validates pages via validatePages immediately after conversion.
  */
-import type { DbClient } from '../../db/client'
 import { requireAnyCapability, requireCapability } from '../../auth/authz'
 import type { CoreCapability } from '../../auth/capabilities'
 import {
@@ -52,22 +51,22 @@ const PAGE_WRITE_CAPABILITIES = [
   'site.style.edit',
 ] satisfies CoreCapability[]
 
-export async function handlePagesRoutes(req: Request, db: DbClient): Promise<Response | null> {
+export async function handlePagesRoutes(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== `${CMS_API_PREFIX}/pages`) return null
 
   if (req.method === 'GET') {
-    const user = await requireCapability(req, db, 'site.read')
+    const user = await requireCapability(req, 'site.read')
     if (user instanceof Response) return user
 
-    const rows = await listDataRows(db, 'pages')
+    const rows = await listDataRows('pages')
     return jsonResponse({ rows })
   }
 
   if (req.method === 'PUT') {
     // Any site writer may enter the endpoint; validatePageWriteDiff below
     // rejects disallowed categories before reconcile can mutate rows.
-    const user = await requireAnyCapability(req, db, PAGE_WRITE_CAPABILITIES)
+    const user = await requireAnyCapability(req, PAGE_WRITE_CAPABILITIES)
     if (user instanceof Response) return user
 
     const PagesBodySchema = Type.Object({
@@ -92,7 +91,7 @@ export async function handlePagesRoutes(req: Request, db: DbClient): Promise<Res
     const baselineIds = body.baselinePageIds ? new Set(body.baselinePageIds) : undefined
 
     // VC roster for slot-sync / dangling-ref context on the changed pages.
-    const vcRows = await listDataRows(db, 'components')
+    const vcRows = await listDataRows('components')
     const visualComponents = vcRows.flatMap((r) => {
       const vc = visualComponentFromRow(r)
       return vc ? [vc] : []
@@ -105,7 +104,7 @@ export async function handlePagesRoutes(req: Request, db: DbClient): Promise<Res
     // write window at the DB level. Rows this request reaps are NOT slug
     // owners — a changed page may take the slug of a page deleted in the same
     // batch (homepage swap + delete of the old homepage saved together).
-    const existingRows = await listDataRows(db, 'pages')
+    const existingRows = await listDataRows('pages')
     const existing = existingRows.map((r) => ({ id: r.id, slug: r.slug }))
     const existingPages = existingRows.map(pageFromRow)
     const reapIds = new Set(rowsToReap(existing.map((r) => r.id), pageIds, baselineIds))
@@ -137,7 +136,7 @@ export async function handlePagesRoutes(req: Request, db: DbClient): Promise<Res
 
     // Batch reconcile: soft-delete / create / update in one short transaction
     // (reap-first + two-phase slug writes — see rows/reconcile.ts).
-    const { reapedPublished } = await reconcileDataRowRoster(db, {
+    const { reapedPublished } = await reconcileDataRowRoster({
       tableId: 'pages',
       writes: pages.map((page) => ({ id: page.id, cells: pageToCells(page), slug: page.slug })),
       keepIds: pageIds,

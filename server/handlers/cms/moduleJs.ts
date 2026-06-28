@@ -14,7 +14,6 @@
  * and junk ids are rejected with a plain 404 (public route — no error
  * envelope).
  */
-import type { DbClient } from '../../db/client'
 import { registry } from '@core/module-engine'
 import { getLatestPublishedSiteSnapshot } from '../../repositories/publish'
 import { buildPublishedSiteModuleJsMap } from '../../publish/moduleJsBundle'
@@ -34,10 +33,6 @@ export function isModuleJsAssetPath(pathname: string): boolean {
   return pathname.startsWith(MODULE_JS_PATH_PREFIX)
 }
 
-interface ModuleJsHandlerContext {
-  db: DbClient
-}
-
 // Version-keyed memo of the published module-JS map. Loading the snapshot +
 // walking every page per request would be the same per-request cost the hole
 // endpoint was flagged for — the single-flight runs the load once per publish
@@ -45,11 +40,10 @@ interface ModuleJsHandlerContext {
 const moduleJsMapCache = createVersionedSingleFlight<ReadonlyMap<string, string>>()
 
 function loadModuleJsMapForVersion(
-  db: DbClient,
   version: number,
 ): Promise<ReadonlyMap<string, string> | null> {
   return moduleJsMapCache.get(version, async () => {
-    const snapshot = await getLatestPublishedSiteSnapshot(db)
+    const snapshot = await getLatestPublishedSiteSnapshot()
     if (!snapshot) return null
     return buildPublishedSiteModuleJsMap(snapshot.site, registry)
   })
@@ -66,7 +60,6 @@ function plainResponse(body: string, status: number): Response {
 export async function handleModuleJsAssetRequest(
   req: Request,
   url: URL,
-  ctx: ModuleJsHandlerContext,
 ): Promise<Response> {
   if (req.method !== 'GET') return plainResponse('Method not allowed', 405)
 
@@ -76,7 +69,7 @@ export async function handleModuleJsAssetRequest(
     return plainResponse('Not found', 404)
   }
 
-  const jsMap = await loadModuleJsMapForVersion(ctx.db, getPublishVersion())
+  const jsMap = await loadModuleJsMapForVersion(getPublishVersion())
   const body = jsMap?.get(moduleId)
   if (body === undefined) return plainResponse('Not found', 404)
 

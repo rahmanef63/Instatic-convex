@@ -25,7 +25,6 @@ import { createHash } from 'node:crypto'
 import type { SiteDocument } from '@core/page-tree'
 import type { PublishedPageRuntimeAssets } from '@core/site-runtime'
 import type { PublishedRuntimePackageImportmap } from '@core/publisher'
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 import type { BuiltRuntimeAssetFile } from '../publish/runtime/bundleScripts'
 import { getDraftSite } from './site'
@@ -151,13 +150,13 @@ function snapshotFromQueryRow(row: SnapshotQueryRow): PublishedPageSnapshot {
  * `pages` and `components` data rows. Returns `null` when no draft site
  * exists yet. Saved layouts are editor-only; publishing ignores them.
  */
-export async function getDraftSiteDocument(db: DbClient): Promise<SiteDocument | null> {
-  const shell = await getDraftSite(db)
+export async function getDraftSiteDocument(): Promise<SiteDocument | null> {
+  const shell = await getDraftSite()
   if (!shell) return null
 
   const [pageRows, vcRows] = await Promise.all([
-    listDataRows(db, 'pages'),
-    listDataRows(db, 'components'),
+    listDataRows('pages'),
+    listDataRows('components'),
   ])
   const visualComponents = validateVisualComponents(
     vcRows.flatMap((r) => { const vc = visualComponentFromRow(r); return vc ? [vc] : [] })
@@ -170,8 +169,8 @@ export async function getDraftSiteDocument(db: DbClient): Promise<SiteDocument |
   }
 }
 
-export async function getDraftPublishStatus(db: DbClient): Promise<DraftPublishStatus> {
-  const draftSite = await getDraftSiteDocument(db)
+export async function getDraftPublishStatus(): Promise<DraftPublishStatus> {
+  const draftSite = await getDraftSiteDocument()
   if (!draftSite) {
     return {
       hasPublishedVersion: false,
@@ -224,7 +223,6 @@ export async function getDraftPublishStatus(db: DbClient): Promise<DraftPublishS
  * mutation.
  */
 export async function persistSitePublish(
-  _db: DbClient,
   input: PersistSitePublishInput,
 ): Promise<void> {
   await getConvex().mutation(api.dataPublish.persistSitePublish, {
@@ -253,7 +251,6 @@ export async function persistSitePublish(
 }
 
 export async function getPublishedPageBySlug(
-  _db: DbClient,
   slug: string,
 ): Promise<PublishedPageSnapshot | null> {
   const row = await getConvex().query(api.dataPublish.publishedPageBySlug, { slug })
@@ -261,16 +258,13 @@ export async function getPublishedPageBySlug(
 }
 
 export async function getPublishedPageSnapshotById(
-  _db: DbClient,
   pageId: string,
 ): Promise<PublishedPageSnapshot | null> {
   const row = await getConvex().query(api.dataPublish.publishedPageById, { pageId })
   return row ? snapshotFromQueryRow(row) : null
 }
 
-export async function getLatestPublishedSiteSnapshot(
-  _db: DbClient,
-): Promise<PublishedPageSnapshot | null> {
+export async function getLatestPublishedSiteSnapshot(): Promise<PublishedPageSnapshot | null> {
   const row = await getConvex().query(api.dataPublish.latestPublishedSiteSnapshot, {})
   return row ? snapshotFromQueryRow(row) : null
 }

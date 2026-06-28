@@ -23,7 +23,6 @@
  */
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { DbClient } from '../../../db/client'
 import type { AuthUser } from '../../../repositories/users'
 import { createAuditEvent } from '../../../repositories/audit'
 import {
@@ -76,14 +75,13 @@ type PluginAuditAction =
  * upgrade without re-fetching the plugin row.
  */
 export async function recordPluginAuditEvent(
-  db: DbClient,
   user: AuthUser,
   req: Request,
   action: PluginAuditAction,
   pluginId: string,
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId: user.id,
     action,
     targetType: 'plugin',
@@ -166,17 +164,16 @@ export function projectSecretSettings(
  * through these handlers.
  */
 export async function presentPluginSecrets(
-  db: DbClient,
   plugin: InstalledPlugin,
 ): Promise<InstalledPlugin> {
   const declared = plugin.manifest.settings ?? []
   if (!declared.some((s) => s.secret)) return plugin
-  const states = await listPluginSecretStates(db, plugin.id)
+  const states = await listPluginSecretStates(plugin.id)
   return { ...plugin, settings: projectSecretSettings(declared, plugin.settings, states) }
 }
 
-export async function pluginsPayload(db: DbClient) {
-  const results = await listInstalledPlugins(db)
+export async function pluginsPayload() {
+  const results = await listInstalledPlugins()
   // Materialise every result — ok or broken — as an InstalledPlugin for the
   // wire, projecting secret settings to their `'***'`/`''` presentation.
   // Broken plugins get a stub with lifecycleStatus='error' so the admin UI
@@ -184,7 +181,7 @@ export async function pluginsPayload(db: DbClient) {
   const presented = await Promise.all(
     results.map(async (r) =>
       r.kind === 'ok'
-        ? { kind: 'ok' as const, plugin: await presentPluginSecrets(db, r.plugin) }
+        ? { kind: 'ok' as const, plugin: await presentPluginSecrets(r.plugin) }
         : r,
     ),
   )
@@ -198,7 +195,7 @@ export async function pluginsPayload(db: DbClient) {
   const pluginsWithCrashes = await Promise.all(
     asPlugins.map(async (plugin) => ({
       ...plugin,
-      recentCrashes: await listPluginCrashes(db, plugin.id, 10),
+      recentCrashes: await listPluginCrashes(plugin.id, 10),
     })),
   )
   // Only properly-parsed plugins contribute admin page nav entries — broken
@@ -380,11 +377,10 @@ export async function removePluginVersionAssets(
 // ---------------------------------------------------------------------------
 
 export async function getEnabledPluginResource(
-  db: DbClient,
   pluginId: string,
   resourceId: string,
 ): Promise<PluginResource | null> {
-  const result = await getInstalledPlugin(db, pluginId)
+  const result = await getInstalledPlugin(pluginId)
   if (!result || result.kind !== 'ok' || !result.plugin.enabled) return null
   return findPluginResource(result.plugin.manifest, resourceId)
 }

@@ -13,37 +13,29 @@
 
 import type { ContentEntryActor } from '@core/plugin-sdk'
 import { hookBus } from '@core/plugins/hookBus'
-import type { DbClient } from '../db/client'
+import { getRowTableRouteInfo } from '../repositories/data/publish'
 
 /** Look up the table slug for a row id — needed to populate the event payload. */
-async function resolveTableSlug(db: DbClient, rowId: string): Promise<string | null> {
-  const { rows } = await db<{ slug: string }>`
-    select data_tables.slug
-    from data_rows
-    join data_tables on data_tables.id = data_rows.table_id
-    where data_rows.id = ${rowId}
-    limit 1
-  `
-  return rows[0]?.slug ?? null
+async function resolveTableSlug(rowId: string): Promise<string | null> {
+  const info = await getRowTableRouteInfo(rowId)
+  return info?.tableSlug ?? null
 }
 
 export async function emitContentEntryCreated(
-  db: DbClient,
   rowId: string,
   actor: ContentEntryActor,
 ): Promise<void> {
-  const tableSlug = await resolveTableSlug(db, rowId)
+  const tableSlug = await resolveTableSlug(rowId)
   if (!tableSlug) return
   await hookBus.emit('content.entry.created', { tableSlug, entryId: rowId, actor })
 }
 
 export async function emitContentEntryUpdated(
-  db: DbClient,
   rowId: string,
   changedFieldIds: string[],
   actor: ContentEntryActor,
 ): Promise<void> {
-  const tableSlug = await resolveTableSlug(db, rowId)
+  const tableSlug = await resolveTableSlug(rowId)
   if (!tableSlug) return
   await hookBus.emit('content.entry.updated', {
     tableSlug,
@@ -54,11 +46,10 @@ export async function emitContentEntryUpdated(
 }
 
 export async function emitContentEntryDeleted(
-  db: DbClient,
   rowId: string,
   actor: ContentEntryActor,
 ): Promise<void> {
-  const tableSlug = await resolveTableSlug(db, rowId)
+  const tableSlug = await resolveTableSlug(rowId)
   if (!tableSlug) return
   await hookBus.emit('content.entry.deleted', { tableSlug, entryId: rowId, actor })
 }

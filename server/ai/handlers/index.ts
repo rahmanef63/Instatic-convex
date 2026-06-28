@@ -1,13 +1,12 @@
 /**
  * AI handlers dispatcher — routes `/admin/api/ai/*` requests to the right
- * handler module. The server router calls `tryHandleAi(req, db, url)` and
+ * handler module. The server router calls `tryHandleAi(req, url)` and
  * either returns the dispatched Response or null (not an AI route).
  *
  * Order matters: more-specific paths first so `/credentials/:id/test`
  * matches before `/credentials/:id`.
  */
 
-import type { DbClient } from '../../db/client'
 import { jsonResponse } from '../../http'
 import { isStateChangingMethod, originAllowed } from '../../auth/security'
 import { tryHandleAiAudit } from './audit'
@@ -20,7 +19,6 @@ import { tryHandleAiModels } from './models'
 
 export function tryHandleAi(
   req: Request,
-  db: DbClient,
   url: URL,
 ): Promise<Response> | null {
   const pathname = url.pathname
@@ -37,12 +35,12 @@ export function tryHandleAi(
   // generic credentials/:id route — both live inside the credentials
   // handler so the order is handled there.
   return (
-    tryHandleAiAudit(req, db, url, pathname) ??
-    tryHandleAiChat(req, db, pathname) ??
-    tryHandleAiToolResult(req, db, pathname) ??
-    tryHandleAiCredentials(req, db, pathname) ??
-    tryHandleAiConversations(req, db, url, pathname) ??
-    tryHandleAiDefaults(req, db, pathname) ??
-    tryHandleAiModels(req, db, url, pathname)
+    tryHandleAiAudit(req, url, pathname) ??
+    tryHandleAiChat(req, pathname) ??
+    tryHandleAiToolResult(req, pathname) ??
+    tryHandleAiCredentials(req, pathname) ??
+    tryHandleAiConversations(req, url, pathname) ??
+    tryHandleAiDefaults(req, pathname) ??
+    tryHandleAiModels(req, url, pathname)
   )
 }

@@ -18,7 +18,6 @@
  * Step-up matches the pattern used by `users.manage` delete / suspend
  * and the `plugins.install` / `plugins.lifecycle` mutation surface.
  */
-import type { DbClient } from '../../db/client'
 import { requireCapability, requireStepUp } from '../../auth/authz'
 import { createAuditEvent } from '../../repositories/audit'
 import { getDraftPublishStatus } from '../../repositories/publish'
@@ -29,20 +28,19 @@ import { requestAuditContext } from './shared'
 
 export async function handlePublishRoutes(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions = {},
 ): Promise<Response | null> {
   const url = new URL(req.url)
 
   if (url.pathname === '/admin/api/cms/publish') {
-    const user = await requireCapability(req, db, 'pages.publish')
+    const user = await requireCapability(req, 'pages.publish')
     if (user instanceof Response) return user
     if (req.method !== 'POST') return methodNotAllowed()
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
 
-    const result = await publishDraftSite(db, user.id, options.uploadsDir)
-    await createAuditEvent(db, {
+    const result = await publishDraftSite(user.id, options.uploadsDir)
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'publish',
       targetType: 'site',
@@ -54,11 +52,11 @@ export async function handlePublishRoutes(
   }
 
   if (url.pathname === '/admin/api/cms/publish/status') {
-    const user = await requireCapability(req, db, 'site.read')
+    const user = await requireCapability(req, 'site.read')
     if (user instanceof Response) return user
     if (req.method !== 'GET') return methodNotAllowed()
 
-    return jsonResponse(await getDraftPublishStatus(db))
+    return jsonResponse(await getDraftPublishStatus())
   }
 
   return null

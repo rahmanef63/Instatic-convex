@@ -9,7 +9,6 @@
  *
  * Access: any `content.*` capability (same guard as the table/row GET routes).
  */
-import type { DbClient } from '../../../db/client'
 import { buildDataMeta } from '@core/data/fields'
 import { listDataTables } from '../../../repositories/data'
 import { jsonResponse } from '../../../http'
@@ -18,15 +17,14 @@ import { requireDataAccess } from './access'
 
 export async function handleDataMetaRoutes(
   req: Request,
-  db: DbClient,
 ): Promise<Response | null> {
   const { pathname } = new URL(req.url)
 
   if (req.method === 'GET' && pathname === `${CMS_API_PREFIX}/data/_meta`) {
-    const access = await requireDataAccess(req, db)
+    const access = await requireDataAccess(req)
     if (access instanceof Response) return access
 
-    const tables = await listDataTables(db)
+    const tables = await listDataTables()
     return jsonResponse({ meta: buildDataMeta(tables) })
   }
 

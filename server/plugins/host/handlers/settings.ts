@@ -21,7 +21,6 @@
 import { validatePluginSettingsRecord, type PluginSettingsValues } from '@core/plugin-sdk'
 import { PluginSecretError } from '../../../repositories/pluginSecrets'
 import type { ApiCallFor } from '../../protocol/apiCallSchema'
-import type { DbClient } from '../../../db/client'
 import { replyApiError, replyApiOk } from '../apiReplies'
 import { persistAndSyncPluginSettings } from '../settingsSync'
 import type { HostPluginRecord } from '../types'
@@ -29,14 +28,13 @@ import type { HostPluginRecord } from '../types'
 export async function handleSettingsReplace(
   msg: ApiCallFor<'cms.settings.replace'>,
   entry: HostPluginRecord,
-  db: DbClient,
 ): Promise<void> {
   const [next] = msg.args
   const declared = entry.manifest.settings ?? []
   const cleaned = validatePluginSettingsRecord(declared, next)
   let runtimeSettings: PluginSettingsValues
   try {
-    runtimeSettings = await persistAndSyncPluginSettings(db, msg.pluginId, declared, cleaned)
+    runtimeSettings = await persistAndSyncPluginSettings(msg.pluginId, declared, cleaned)
   } catch (err) {
     if (err instanceof PluginSecretError) {
       replyApiError(msg.pluginId, msg.correlationId, err.message)

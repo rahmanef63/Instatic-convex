@@ -20,7 +20,6 @@
  * `../../../plugins/runtime`; the on-disk side lives in `./shared.ts`.
  */
 import { gt as semverGt, lt as semverLt } from 'semver'
-import type { DbClient } from '../../../db/client'
 import type { AuthUser } from '../../../repositories/users'
 import {
   getInstalledPlugin,
@@ -72,11 +71,10 @@ import { maybeAutoInstallPluginPack, type PluginPackSummary } from './pack'
 
 export async function handlePluginsCollection(
   req: Request,
-  db: DbClient,
   user: AuthUser,
 ): Promise<Response> {
   if (req.method === 'GET') {
-    return jsonResponse(await pluginsPayload(db))
+    return jsonResponse(await pluginsPayload())
   }
 
   if (req.method === 'POST') {
@@ -97,17 +95,17 @@ export async function handlePluginsCollection(
       const grantedPermissions = readPermissionGrants(body.grantedPermissions)
       const grantError = assertPluginPermissionGrants(manifest, grantedPermissions)
       if (grantError) return grantError
-      const installed = await installPlugin(db, manifest, grantedPermissions)
-      const updatedResult = await setPluginLifecycleStatus(db, installed.id, 'active')
+      const installed = await installPlugin(manifest, grantedPermissions)
+      const updatedResult = await setPluginLifecycleStatus(installed.id, 'active')
       const plugin = (updatedResult?.kind === 'ok' ? updatedResult.plugin : null) ?? installed
-      await recordPluginAuditEvent(db, user, req, 'plugin.install', plugin.id)
+      await recordPluginAuditEvent(user, req, 'plugin.install', plugin.id)
       broadcastPluginEvent({
         kind: 'installed',
         pluginId: plugin.id,
         version: plugin.version,
         occurredAt: new Date().toISOString(),
       })
-      return jsonResponse({ plugin: await presentPluginSecrets(db, plugin), ...(await pluginsPayload(db)) }, { status: 201 })
+      return jsonResponse({ plugin: await presentPluginSecrets(plugin), ...(await pluginsPayload()) }, { status: 201 })
     } catch (err) {
       return badRequest(getErrorMessage(err, 'Invalid plugin manifest'))
     }
@@ -139,7 +137,6 @@ export async function handleInspectPackage(req: Request): Promise<Response> {
 
 export async function handlePackageInstall(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
   user: AuthUser,
 ): Promise<Response> {
@@ -162,7 +159,7 @@ export async function handlePackageInstall(
     // A broken existing install (corrupt manifest_json) is treated as if
     // there is no current install — the fresh-install path replaces it via
     // the upsert without attempting lifecycle hooks on the broken row.
-    const existingResult = await getInstalledPlugin(db, pluginPackage.manifest.id)
+    const existingResult = await getInstalledPlugin(pluginPackage.manifest.id)
     const existing = existingResult?.kind === 'ok' ? existingResult.plugin : null
     if (existing && semverLt(pluginPackage.manifest.version, existing.version)) {
       return badRequest(
@@ -171,7 +168,6 @@ export async function handlePackageInstall(
     }
 
     const ctx: InstallContext = {
-      db,
       options,
       user,
       req,
@@ -189,7 +185,6 @@ export async function handlePackageInstall(
 }
 
 interface InstallContext {
-  db: DbClient
   options: CmsHandlerOptions
   user: AuthUser
   req: Request
@@ -202,7 +197,7 @@ interface InstallContext {
 // ---------------------------------------------------------------------------
 
 async function installFreshFromPackage(ctx: InstallContext): Promise<Response> {
-  const { db, options, user, req, pluginPackage, grantedPermissions } = ctx
+  const { options, user, req, pluginPackage, grantedPermissions } = ctx
   // `uploadsDir` was checked by the caller; assert to narrow the type.
   if (!options.uploadsDir) throw new Error('uploadsDir required')
 
@@ -211,11 +206,11 @@ async function installFreshFromPackage(ctx: InstallContext): Promise<Response> {
     pluginPackage.manifest,
     pluginPackage.files,
   )
-  const installed = await installPlugin(db, manifest, grantedPermissions)
-  const installLifecycle = await runPluginLifecycleHook(db, installed, options, 'install', 'installed')
+  const installed = await installPlugin(manifest, grantedPermissions)
+  const installLifecycle = await runPluginLifecycleHook(installed, options, 'install', 'installed')
   if (!installLifecycle.ok) {
     return jsonResponse(
-      { plugin: await presentPluginSecrets(db, installLifecycle.plugin), ...(await pluginsPayload(db)) },
+      { plugin: await presentPluginSecrets(installLifecycle.plugin), ...(await pluginsPayload()) },
       { status: 201 },
     )
   }
@@ -226,7 +221,6 @@ async function installFreshFromPackage(ctx: InstallContext): Promise<Response> {
   // prior host-side bookkeeping.
   await unloadPlugin(installed.id)
   const activateLifecycle = await runPluginLifecycleHook(
-    db,
     installLifecycle.plugin,
     options,
     'activate',
@@ -238,10 +232,10 @@ async function installFreshFromPackage(ctx: InstallContext): Promise<Response> {
   // expected. Skipping the manual "Install pack" click means a UI Kit-style
   // plugin "just works" after upload.
   const packSummary: PluginPackSummary | null = activateLifecycle.ok
-    ? await maybeAutoInstallPluginPack(db, activateLifecycle.plugin, options, user, req)
+    ? await maybeAutoInstallPluginPack(activateLifecycle.plugin, options, user, req)
     : null
 
-  await recordPluginAuditEvent(db, user, req, 'plugin.install', activateLifecycle.plugin.id, {
+  await recordPluginAuditEvent(user, req, 'plugin.install', activateLifecycle.plugin.id, {
     version: activateLifecycle.plugin.version,
   })
   broadcastPluginEvent({
@@ -252,8 +246,8 @@ async function installFreshFromPackage(ctx: InstallContext): Promise<Response> {
   })
   return jsonResponse(
     {
-      plugin: await presentPluginSecrets(db, activateLifecycle.plugin),
-      ...(await pluginsPayload(db)),
+      plugin: await presentPluginSecrets(activateLifecycle.plugin),
+      ...(await pluginsPayload()),
       pack: packSummary,
     },
     { status: 201 },
@@ -288,7 +282,7 @@ interface UpgradeContext extends InstallContext {
  * explains the upgrade failure.
  */
 async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response> {
-  const { db, options, user, req, existing, pluginPackage, grantedPermissions } = ctx
+  const { options, user, req, existing, pluginPackage, grantedPermissions } = ctx
   if (!options.uploadsDir) throw new Error('uploadsDir required')
   const fromVersion = existing.version
   const newVersion = pluginPackage.manifest.version
@@ -297,7 +291,7 @@ async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response>
   // 1. Deactivate the old version. Best-effort — a deactivate failure
   //    shouldn't prevent the upgrade from proceeding (the new version is
   //    about to replace it anyway). We log and move on.
-  await teardownPreviousVersion(db, pluginId, existing, options.uploadsDir)
+  await teardownPreviousVersion(pluginId, existing, options.uploadsDir)
 
   // 2. Write new assets.
   const newManifest = await writePluginPackageFiles(
@@ -308,11 +302,11 @@ async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response>
 
   // 3. Replace DB row. `installPlugin` upserts — settings_json + installed_at
   //    are preserved by the SET clause (it doesn't reference them).
-  const upgraded = await installPlugin(db, newManifest, grantedPermissions)
+  const upgraded = await installPlugin(newManifest, grantedPermissions)
   // Refresh settings cache from the upserted row (merging decrypted secrets)
   // so the worker's `loadPluginServerEntrypoint` seeds the right values into
   // the worker's local mirror.
-  await primePluginSettingsCache(db, upgraded)
+  await primePluginSettingsCache(upgraded)
 
   // 4 + 5. Try to migrate then activate. On any failure we restore the old
   //        version end-to-end.
@@ -336,17 +330,17 @@ async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response>
       }
     }
     if (loaded) {
-      await runPluginLifecycle(db, pluginId, 'activate')
+      await runPluginLifecycle(pluginId, 'activate')
     }
-    await setPluginLifecycleStatus(db, pluginId, 'active')
+    await setPluginLifecycleStatus(pluginId, 'active')
   } catch (err) {
     const failureMessage = lifecycleErrorMessage(err)
     console.error(`[plugin:${pluginId}] upgrade ${fromVersion} → ${newVersion} failed:`, err)
-    await rollbackUpgrade({ db, options, existing, newManifest })
+    await rollbackUpgrade({ options, existing, newManifest })
     return jsonResponse(
       {
         error: `Upgrade failed: ${failureMessage}. Rolled back to version ${fromVersion}.`,
-        ...(await pluginsPayload(db)),
+        ...(await pluginsPayload()),
       },
       { status: 400 },
     )
@@ -361,15 +355,15 @@ async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response>
 
   // Re-fetch so the response carries the post-activation row (settings,
   // lifecycle = 'active', etc.).
-  const finalResult = await getInstalledPlugin(db, pluginId)
+  const finalResult = await getInstalledPlugin(pluginId)
   const finalRow = (finalResult?.kind === 'ok' ? finalResult.plugin : null) ?? upgraded
 
   // Auto-install pack on upgrade too — same trigger conditions as fresh
   // install. A new pack version often ships new VCs/templates that the
   // user expects to see immediately.
-  const packSummary = await maybeAutoInstallPluginPack(db, finalRow, options, user, req)
+  const packSummary = await maybeAutoInstallPluginPack(finalRow, options, user, req)
 
-  await recordPluginAuditEvent(db, user, req, 'plugin.update', pluginId, {
+  await recordPluginAuditEvent(user, req, 'plugin.update', pluginId, {
     fromVersion,
     toVersion: newVersion,
   })
@@ -382,8 +376,8 @@ async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response>
   })
   return jsonResponse(
     {
-      plugin: await presentPluginSecrets(db, finalRow),
-      ...(await pluginsPayload(db)),
+      plugin: await presentPluginSecrets(finalRow),
+      ...(await pluginsPayload()),
       pack: packSummary,
       upgrade: { fromVersion, toVersion: newVersion },
     },
@@ -404,7 +398,6 @@ async function installUpgradeFromPackage(ctx: UpgradeContext): Promise<Response>
  * (the new version is about to replace it anyway).
  */
 async function teardownPreviousVersion(
-  db: DbClient,
   pluginId: string,
   plugin: InstalledPlugin,
   uploadsDir: string,
@@ -413,7 +406,7 @@ async function teardownPreviousVersion(
     const manifest = pluginManifestWithGrants(plugin)
     if (manifest.entrypoints?.server) {
       await loadPluginServerEntrypoint(manifest, uploadsDir)
-      await runPluginLifecycle(db, pluginId, 'deactivate')
+      await runPluginLifecycle(pluginId, 'deactivate')
     }
   } catch (err) {
     console.error(`[plugin:${pluginId}] pre-upgrade deactivate failed`, err)
@@ -436,18 +429,16 @@ async function teardownPreviousVersion(
  *    site owner can resolve manually from the admin UI.
  */
 async function rollbackUpgrade(args: {
-  db: DbClient
   options: CmsHandlerOptions
   existing: InstalledPlugin
   newManifest: PluginManifest
 }): Promise<void> {
-  const { db, options, existing, newManifest } = args
+  const { options, existing, newManifest } = args
   const pluginId = existing.id
 
   // Restore DB row to previous manifest + grants. The upsert preserves
   // settings + installed_at automatically.
   const restored = await installPlugin(
-    db,
     pluginManifestWithGrants(existing),
     existing.grantedPermissions,
   )
@@ -466,7 +457,7 @@ async function rollbackUpgrade(args: {
   deactivatePluginModulePack(pluginId)
   try {
     const restoredManifest = pluginManifestWithGrants(restored)
-    await primePluginSettingsCache(db, restored)
+    await primePluginSettingsCache(restored)
     if (
       restoredManifest.entrypoints?.modules
       && restoredManifest.grantedPermissions?.includes('modules.register')
@@ -476,10 +467,9 @@ async function rollbackUpgrade(args: {
     }
     if (restoredManifest.entrypoints?.server) {
       const loaded = await loadPluginServerEntrypoint(restoredManifest, options.uploadsDir)
-      if (loaded) await runPluginLifecycle(db, pluginId, 'activate')
+      if (loaded) await runPluginLifecycle(pluginId, 'activate')
     }
     await setPluginLifecycleStatus(
-      db,
       pluginId,
       'error',
       `Upgrade to ${newManifest.version} failed; rolled back to ${existing.version}.`,
@@ -487,7 +477,6 @@ async function rollbackUpgrade(args: {
   } catch (err) {
     console.error(`[plugin:${pluginId}] rollback re-activate failed`, err)
     await setPluginLifecycleStatus(
-      db,
       pluginId,
       'error',
       `Upgrade to ${newManifest.version} failed and rollback re-activate failed: ${lifecycleErrorMessage(err)}`,

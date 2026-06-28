@@ -74,15 +74,6 @@ const CEILING = 700
 const RATCHET_SLACK = 30
 
 /**
- * Append-only ledgers — grow by design, exempt from the cap entirely.
- * (CLAUDE.md: every schema change appends a migration to BOTH files.)
- */
-const EXEMPT = new Set<string>([
-  'server/db/migrations-pg.ts',
-  'server/db/migrations-sqlite.ts',
-])
-
-/**
  * Grandfathered hotspots: modules already over {@link CEILING} when this gate
  * landed, frozen at their current line count. Ratchet DOWN only — see the
  * file header for the rules. Captured via `wc -l` on 2026-05-31.
@@ -161,7 +152,6 @@ describe('Module size budgets', () => {
   it('no new module exceeds the ceiling', () => {
     const offenders = ALL_MODULES.filter(
       (path) =>
-        !EXEMPT.has(path) &&
         !(path in GRANDFATHERED) &&
         lineCount(path) > CEILING,
     ).map((path) => `${path} (${lineCount(path)} lines)`)

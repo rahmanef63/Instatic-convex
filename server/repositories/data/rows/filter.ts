@@ -12,7 +12,6 @@
  * orderBy key still throws before the query runs, then maps the joined rows
  * through `mapRow`.
  */
-import type { DbClient } from '../../../db/client'
 import type { DataRow } from '@core/data/schemas'
 import type { StorageFilterValue } from '@core/plugin-sdk/storageSchemas'
 import { api, getConvex } from '../../../convex/client'
@@ -56,7 +55,6 @@ const ROW_LEVEL_ORDER_KEYS = new Set([
 ])
 
 export async function listDataRowsWithFilter(
-  _db: DbClient,
   tableId: string,
   options: ListDataRowsFilterOptions = {},
 ): Promise<ListDataRowsWithFilterResult> {

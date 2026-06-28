@@ -14,7 +14,6 @@
  * dispatcher, which imports the settings handler — a cycle otherwise).
  */
 
-import type { DbClient } from '../db/client'
 import type { InstalledPlugin, PluginSettingsValues } from '@core/plugin-sdk'
 import { getInstalledPlugin } from '../repositories/plugins'
 import { resolvePluginSecretsForRuntime } from '../repositories/pluginSecrets'
@@ -38,11 +37,9 @@ export function dropCachedPluginSettings(pluginId: string): void {
  * plugin load proceeds, the worker just sees the field empty.
  */
 export async function primePluginSettingsCache(
-  db: DbClient,
   plugin: InstalledPlugin,
 ): Promise<PluginSettingsValues> {
   const secrets = await resolvePluginSecretsForRuntime(
-    db,
     plugin.id,
     plugin.manifest.settings ?? [],
   )
@@ -57,10 +54,9 @@ export async function primePluginSettingsCache(
  * or its manifest is broken.
  */
 export async function refreshPluginSettingsCache(
-  db: DbClient,
   pluginId: string,
 ): Promise<PluginSettingsValues | null> {
-  const result = await getInstalledPlugin(db, pluginId)
+  const result = await getInstalledPlugin(pluginId)
   if (!result || result.kind !== 'ok') return null
-  return primePluginSettingsCache(db, result.plugin)
+  return primePluginSettingsCache(result.plugin)
 }

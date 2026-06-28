@@ -16,7 +16,6 @@
  * plain integers. Unrecognised or invalid options return 400.
  */
 import { nanoid } from 'nanoid'
-import type { DbClient } from '../../../db/client'
 import {
   createPluginRecord,
   deletePluginRecord,
@@ -85,11 +84,10 @@ function parseListOptions(url: string): { options: unknown } | { error: string }
 
 export async function handlePluginRecordsCollection(
   req: Request,
-  db: DbClient,
   pluginId: string,
   resourceId: string,
 ): Promise<Response> {
-  const resource = await getEnabledPluginResource(db, pluginId, resourceId)
+  const resource = await getEnabledPluginResource(pluginId, resourceId)
   if (!resource) return pluginResourceNotFound()
 
   if (req.method === 'GET') {
@@ -103,7 +101,7 @@ export async function handlePluginRecordsCollection(
       return badRequest('Invalid list options: filter, orderBy, limit, and offset must match the expected types')
     }
 
-    const { records, totalCount } = await listPluginRecords(db, pluginId, resourceId, options)
+    const { records, totalCount } = await listPluginRecords(pluginId, resourceId, options)
     return jsonResponse({ resource, records, totalCount })
   }
 
@@ -113,7 +111,7 @@ export async function handlePluginRecordsCollection(
     if (!body) return badRequest('Invalid request body')
     try {
       const data = validatePluginRecordData(resource, body.data ?? body)
-      const record = await createPluginRecord(db, {
+      const record = await createPluginRecord({
         id: nanoid(),
         pluginId,
         resourceId,
@@ -130,12 +128,11 @@ export async function handlePluginRecordsCollection(
 
 export async function handlePluginRecordItem(
   req: Request,
-  db: DbClient,
   pluginId: string,
   resourceId: string,
   recordId: string,
 ): Promise<Response> {
-  const resource = await getEnabledPluginResource(db, pluginId, resourceId)
+  const resource = await getEnabledPluginResource(pluginId, resourceId)
   if (!resource) return pluginResourceNotFound()
 
   if (req.method === 'PATCH') {
@@ -144,7 +141,7 @@ export async function handlePluginRecordItem(
     if (!body) return badRequest('Invalid request body')
     try {
       const data = validatePluginRecordData(resource, body.data ?? body)
-      const record = await updatePluginRecord(db, {
+      const record = await updatePluginRecord({
         id: recordId,
         pluginId,
         resourceId,
@@ -158,7 +155,7 @@ export async function handlePluginRecordItem(
   }
 
   if (req.method === 'DELETE') {
-    const deleted = await deletePluginRecord(db, {
+    const deleted = await deletePluginRecord({
       id: recordId,
       pluginId,
       resourceId,

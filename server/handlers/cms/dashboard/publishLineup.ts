@@ -3,7 +3,8 @@
  * upcoming scheduled, recently published, drafts in progress.
  */
 import { isoDateOrNull } from '@core/utils/isoDate'
-import type { DbClient } from '../../../db/client'
+import type { DataRow } from '@core/data/schemas'
+import { listDataRows, listDataTables } from '../../../repositories/data'
 import { buildRowPath } from './shared'
 import type { PublishLineupRow, PublishLineupStats } from './types'
 
@@ -16,8 +17,10 @@ type LineupRow = {
   slug: string
   table_id: string
   route_base: string | null
-  scheduled_publish_at: string | Date | null
-  published_at: string | Date | null
+  status: DataRow['status']
+  scheduled_publish_at: string | null
+  published_at: string | null
+  updated_at: string
 }
 
 /**
@@ -38,12 +41,27 @@ type LineupRow = {
  * soonest first) → published rows (newest first) → drafts. Same order
  * the original mocked widget used so the visual rhythm is preserved.
  */
-export async function readPublishLineup(db: DbClient): Promise<PublishLineupStats> {
-  const [scheduled, published, drafts] = await Promise.all([
-    fetchSlice(db, 'scheduled', SCHEDULED_LIMIT),
-    fetchSlice(db, 'published', PUBLISHED_LIMIT),
-    fetchSlice(db, 'draft', DRAFT_LIMIT),
-  ])
+export async function readPublishLineup(): Promise<PublishLineupStats> {
+  // The repository reads are per-table, so collect every table's rows once
+  // and slice the three status lanes client-side. The dashboard widget is a
+  // small snapshot — full-table reads are acceptable here.
+  const tables = await listDataTables()
+  const routeBaseByTable = new Map(tables.map((t) => [t.id, t.routeBase]))
+  const perTable = await Promise.all(tables.map((t) => listDataRows(t.id)))
+  const allRows: LineupRow[] = perTable.flat().map((r) => toLineupRow(r, routeBaseByTable))
+
+  const scheduled = allRows
+    .filter((r) => r.status === 'scheduled' && r.scheduled_publish_at !== null)
+    .sort((a, b) => (a.scheduled_publish_at! < b.scheduled_publish_at! ? -1 : 1))
+    .slice(0, SCHEDULED_LIMIT)
+  const published = allRows
+    .filter((r) => r.status === 'published' && r.published_at !== null)
+    .sort((a, b) => (a.published_at! > b.published_at! ? -1 : 1))
+    .slice(0, PUBLISHED_LIMIT)
+  const drafts = allRows
+    .filter((r) => r.status === 'draft')
+    .sort((a, b) => (a.updated_at > b.updated_at ? -1 : 1))
+    .slice(0, DRAFT_LIMIT)
 
   const rows: PublishLineupRow[] = [
     ...scheduled.map((r): PublishLineupRow => ({
@@ -69,72 +87,15 @@ export async function readPublishLineup(db: DbClient): Promise<PublishLineupStat
   return { rows }
 }
 
-/**
- * Fetch one slice of the lineup. The status determines the sort key:
- *   • scheduled → `scheduled_publish_at` asc  (soonest first)
- *   • published → `published_at` desc         (newest first)
- *   • draft     → `updated_at` desc           (most-recently touched)
- *
- * Each query is hand-written rather than parameterising the ORDER BY
- * because tagged-template SQL binding can't safely interpolate column
- * names, and the three queries fit on the screen.
- */
-async function fetchSlice(
-  db: DbClient,
-  status: 'scheduled' | 'published' | 'draft',
-  limit: number,
-): Promise<LineupRow[]> {
-  if (status === 'scheduled') {
-    const { rows } = await db<LineupRow>`
-      select r.id,
-             r.slug,
-             r.table_id,
-             t.route_base,
-             r.scheduled_publish_at,
-             r.published_at
-      from data_rows r
-      join data_tables t on t.id = r.table_id
-      where r.deleted_at is null
-        and r.status = 'scheduled'
-        and r.scheduled_publish_at is not null
-      order by r.scheduled_publish_at asc
-      limit ${limit}
-    `
-    return rows
+function toLineupRow(row: DataRow, routeBaseByTable: Map<string, string>): LineupRow {
+  return {
+    id: row.id,
+    slug: row.slug,
+    table_id: row.tableId,
+    route_base: routeBaseByTable.get(row.tableId) ?? null,
+    status: row.status,
+    scheduled_publish_at: row.scheduledPublishAt,
+    published_at: row.publishedAt,
+    updated_at: row.updatedAt,
   }
-  if (status === 'published') {
-    const { rows } = await db<LineupRow>`
-      select r.id,
-             r.slug,
-             r.table_id,
-             t.route_base,
-             r.scheduled_publish_at,
-             r.published_at
-      from data_rows r
-      join data_tables t on t.id = r.table_id
-      where r.deleted_at is null
-        and r.status = 'published'
-        and r.published_at is not null
-      order by r.published_at desc
-      limit ${limit}
-    `
-    return rows
-  }
-  // Drafts — most-recently-touched first. We don't list the entire
-  // backlog; the widget is a snapshot, not the Content workspace.
-  const { rows } = await db<LineupRow>`
-    select r.id,
-           r.slug,
-           r.table_id,
-           t.route_base,
-           r.scheduled_publish_at,
-           r.published_at
-    from data_rows r
-    join data_tables t on t.id = r.table_id
-    where r.deleted_at is null
-      and r.status = 'draft'
-    order by r.updated_at desc
-    limit ${limit}
-  `
-  return rows
 }

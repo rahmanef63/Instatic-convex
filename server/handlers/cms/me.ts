@@ -18,7 +18,6 @@
  * cost storage and tracking ownership-for-cascade-delete is out of scope
  * for this surface. Operators can prune via the media library.
  */
-import type { DbClient } from '../../db/client'
 import { getSessionHash, requireAuthenticatedUser, requireStepUp } from '../../auth/authz'
 import { hashPassword, verifyPassword } from '../../auth/tokens'
 import { markSessionMfaPassed } from '../../auth/sessions'
@@ -102,35 +101,34 @@ function newRecoveryCodeSet(): { codes: string[]; hashes: string[] } {
 
 export async function handleMeRoutes(
   req: Request,
-  db: DbClient,
   _options: CmsHandlerOptions,
 ): Promise<Response | null> {
   const url = new URL(req.url)
 
   if (url.pathname === `${CMS_API_PREFIX}/me`) {
     if (req.method !== 'PATCH') return null
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
     const body = await readValidatedBody(req, UpdateProfileBodySchema)
     if (!body) return badRequest('Invalid profile payload')
 
     const email = body.email.trim()
     if (!email.toLowerCase().includes('@')) return badRequest('Invalid email')
-    const existing = await findUserByEmail(db, email)
+    const existing = await findUserByEmail(email)
     if (existing && existing.id !== user.id) {
       return badRequest('Email is already in use')
     }
 
     try {
-      const updated = await updateUser(db, user.id, {
+      const updated = await updateUser(user.id, {
         displayName: body.displayName,
         email,
       })
       if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
 
-      await createAuditEvent(db, {
+      await createAuditEvent({
         actorUserId: user.id,
         action: 'user.update',
         targetType: 'user',
@@ -150,9 +148,9 @@ export async function handleMeRoutes(
 
   if (url.pathname === `${CMS_API_PREFIX}/me/password`) {
     if (req.method !== 'PATCH') return methodNotAllowed()
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
     const body = await readValidatedBody(req, ChangePasswordBodySchema)
     if (!body) return badRequest('Password must be at least 12 characters')
@@ -160,11 +158,11 @@ export async function handleMeRoutes(
       return badRequest('Choose a different password')
     }
 
-    const updated = await updateUserPasswordHash(db, user.id, await hashPassword(body.newPassword))
+    const updated = await updateUserPasswordHash(user.id, await hashPassword(body.newPassword))
     if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
     const currentSessionHash = await getSessionHash(req)
-    const revokedSessions = await revokeAllOtherSessions(db, user.id, currentSessionHash)
-    await createAuditEvent(db, {
+    const revokedSessions = await revokeAllOtherSessions(user.id, currentSessionHash)
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',
@@ -177,9 +175,9 @@ export async function handleMeRoutes(
 
   if (url.pathname === `${CMS_API_PREFIX}/me/mfa/totp/start`) {
     if (req.method !== 'POST') return methodNotAllowed()
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
     const secret = generateTotpSecret()
     return jsonResponse({
@@ -194,9 +192,9 @@ export async function handleMeRoutes(
 
   if (url.pathname === `${CMS_API_PREFIX}/me/mfa/totp/enable`) {
     if (req.method !== 'POST') return methodNotAllowed()
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
     const body = await readValidatedBody(req, EnableTotpBodySchema)
     if (!body) return badRequest('Invalid MFA setup request')
@@ -213,7 +211,7 @@ export async function handleMeRoutes(
     const recovery = newRecoveryCodeSet()
     let updated: Awaited<ReturnType<typeof enableUserTotpMfa>>
     try {
-      updated = await enableUserTotpMfa(db, user.id, {
+      updated = await enableUserTotpMfa(user.id, {
         secret: body.secret,
         recoveryCodeHashes: recovery.hashes,
       })
@@ -225,9 +223,9 @@ export async function handleMeRoutes(
     if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
 
     const currentSessionHash = await getSessionHash(req)
-    if (currentSessionHash) await markSessionMfaPassed(db, currentSessionHash)
-    await revokeAllOtherSessions(db, user.id, currentSessionHash)
-    await createAuditEvent(db, {
+    if (currentSessionHash) await markSessionMfaPassed(currentSessionHash)
+    await revokeAllOtherSessions(user.id, currentSessionHash)
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',
@@ -240,13 +238,13 @@ export async function handleMeRoutes(
 
   if (url.pathname === `${CMS_API_PREFIX}/me/mfa/totp`) {
     if (req.method !== 'DELETE') return methodNotAllowed()
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
-    const updated = await disableUserTotpMfa(db, user.id)
+    const updated = await disableUserTotpMfa(user.id)
     if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',
@@ -259,15 +257,15 @@ export async function handleMeRoutes(
 
   if (url.pathname === `${CMS_API_PREFIX}/me/mfa/recovery-codes`) {
     if (req.method !== 'POST') return methodNotAllowed()
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user)
+    const stepUp = await requireStepUp(req, user)
     if (stepUp) return stepUp
     if (!user.mfaEnabled) return badRequest('Enable MFA before generating recovery codes')
     const recovery = newRecoveryCodeSet()
-    const updated = await replaceUserRecoveryCodeHashes(db, user.id, recovery.hashes)
+    const updated = await replaceUserRecoveryCodeHashes(user.id, recovery.hashes)
     if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',
@@ -280,18 +278,18 @@ export async function handleMeRoutes(
 
   if (url.pathname === `${CMS_API_PREFIX}/me/security/step-up`) {
     if (req.method !== 'PATCH') return methodNotAllowed()
-    const user = await requireAuthenticatedUser(req, db)
+    const user = await requireAuthenticatedUser(req)
     if (user instanceof Response) return user
-    const stepUp = await requireStepUp(req, db, user, { policy: 'always' })
+    const stepUp = await requireStepUp(req, user, { policy: 'always' })
     if (stepUp) return stepUp
     const body = await readValidatedBody(req, UpdateStepUpPolicyBodySchema)
     if (!body) return badRequest('Invalid step-up settings')
-    const updated = await updateUserStepUpPolicy(db, user.id, {
+    const updated = await updateUserStepUpPolicy(user.id, {
       mode: body.mode,
       windowMinutes: body.windowMinutes,
     })
     if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',
@@ -307,14 +305,14 @@ export async function handleMeRoutes(
 
   if (url.pathname !== `${CMS_API_PREFIX}/me/avatar`) return null
 
-  const user = await requireAuthenticatedUser(req, db)
+  const user = await requireAuthenticatedUser(req)
   if (user instanceof Response) return user
 
   if (req.method === 'POST') {
     const file = await readUploadedFile(req)
     if (!file) return badRequest('Missing file')
 
-    const asset = await acceptUploadedMedia(db, {
+    const asset = await acceptUploadedMedia({
       file,
       maxBytes: MAX_AVATAR_BYTES,
       allowedMimes: IMAGE_MIMES,
@@ -325,7 +323,7 @@ export async function handleMeRoutes(
     })
     if (asset instanceof Response) return asset
 
-    const updated = await setUserAvatarMediaId(db, user.id, asset.id)
+    const updated = await setUserAvatarMediaId(user.id, asset.id)
     if (!updated) {
       // The user row vanished between auth and the update (e.g. concurrent
       // soft-delete). The uploaded asset stays in the media library — it's
@@ -333,7 +331,7 @@ export async function handleMeRoutes(
       return jsonResponse({ error: 'User not found' }, { status: 404 })
     }
 
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',
@@ -346,10 +344,10 @@ export async function handleMeRoutes(
   }
 
   if (req.method === 'DELETE') {
-    const updated = await setUserAvatarMediaId(db, user.id, null)
+    const updated = await setUserAvatarMediaId(user.id, null)
     if (!updated) return jsonResponse({ error: 'User not found' }, { status: 404 })
 
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: user.id,
       action: 'user.update',
       targetType: 'user',

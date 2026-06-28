@@ -17,7 +17,6 @@ import { Type } from '@core/utils/typeboxHelpers'
 import { AiToolOutputSchema } from '@core/ai'
 import { jsonResponse, readValidatedBody, badRequest } from '../../http'
 import { requireCapability } from '../../auth/authz'
-import type { DbClient } from '../../db/client'
 import { resolveBridgeToolResult } from '../runtime'
 
 const ToolResultBodySchema = Type.Object({
@@ -32,18 +31,17 @@ const ToolResultBodySchema = Type.Object({
 
 export function tryHandleAiToolResult(
   req: Request,
-  db: DbClient,
   pathname: string,
 ): Promise<Response> | null {
   if (pathname !== '/admin/api/ai/tool-result') return null
-  return handleAiToolResult(req, db)
+  return handleAiToolResult(req)
 }
 
-async function handleAiToolResult(req: Request, db: DbClient): Promise<Response> {
+async function handleAiToolResult(req: Request): Promise<Response> {
   if (req.method !== 'POST') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
-  const userOrResponse = await requireCapability(req, db, 'ai.tools.write')
+  const userOrResponse = await requireCapability(req, 'ai.tools.write')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const body = await readValidatedBody(req, ToolResultBodySchema)

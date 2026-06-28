@@ -15,20 +15,15 @@
  *                            growth without TTL infrastructure).
  *
  * Convex port: the read/write bodies are thin adapters over
- * `convex/pluginSchedules.ts` (docs/CONVEX-MIGRATION.md §2). The exported
- * signatures are frozen — the leading SQL `DbClient` handle is retained (named
- * `_db`, intentionally unused) so the scheduler tick (`server/plugins/
- * scheduler.ts`) keeps calling these unchanged until `server/db/*` is retired
- * (§7). The cadence/last-run mappers (`mapSchedule`, `mapRun`) stay here; the
- * Convex functions return raw rows with `cadence_json` opaque.
+ * `convex/pluginSchedules.ts` (docs/CONVEX-MIGRATION.md §2). The cadence/last-run
+ * mappers (`mapSchedule`, `mapRun`) stay here; the Convex functions return raw
+ * rows with `cadence_json` opaque.
  *
- * THE HARD CASE (§4.1): the SQL `tryClaimSchedule` advisory-lock-adjacent claim
- * (a guarded `running_token` flip) becomes the atomic `tryClaim` mutation —
- * Convex serializability makes it a single-winner claim with no advisory lock.
- * `selectDueSchedules`'s `join installed_plugins` becomes a per-row index lookup
- * inside the Convex query. `advisoryLock.ts` is NOT called from here.
+ * THE HARD CASE (§4.1): the `tryClaim` mutation is a guarded `running_token`
+ * flip — Convex serializability makes it a single-winner claim with no advisory
+ * lock. `selectDueSchedules`'s join becomes a per-row index lookup inside the
+ * Convex query.
  */
-import type { DbClient } from '../db/client'
 import { api, getConvex } from '../convex/client'
 import { isoDate, isoDateOrNull } from '@core/utils/isoDate'
 
@@ -213,7 +208,6 @@ interface ScheduleUpsertInput {
  * re-registered during the latest `activate()` pass.
  */
 export async function upsertPluginSchedule(
-  _db: DbClient,
   input: ScheduleUpsertInput,
 ): Promise<void> {
   await getConvex().mutation(api.pluginSchedules.upsert, {
@@ -233,7 +227,6 @@ export async function upsertPluginSchedule(
  * still there.
  */
 export async function disablePluginSchedule(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<void> {
@@ -251,7 +244,6 @@ export async function disablePluginSchedule(
  * ISO-8601 strings compare correctly as text in both dialects.
  */
 export async function disableSchedulesNotReclaimedSince(
-  _db: DbClient,
   pluginId: string,
   activationStartedAtIso: string,
 ): Promise<void> {
@@ -262,7 +254,6 @@ export async function disableSchedulesNotReclaimedSince(
 }
 
 export async function listSchedulesForPlugin(
-  _db: DbClient,
   pluginId: string,
 ): Promise<PluginSchedule[]> {
   const rows = await getConvex().query(api.pluginSchedules.listForPlugin, { pluginId })
@@ -270,7 +261,6 @@ export async function listSchedulesForPlugin(
 }
 
 export async function getSchedule(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<PluginSchedule | null> {
@@ -290,7 +280,6 @@ export async function getSchedule(
  * would just spawn empty workers that record error runs.
  */
 export async function selectDueSchedules(
-  _db: DbClient,
   nowIso: string,
   limit: number,
 ): Promise<PluginSchedule[]> {
@@ -316,7 +305,6 @@ export async function selectDueSchedules(
  * a paused schedule so the operator can verify a fix before resuming.
  */
 export async function tryClaimSchedule(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   token: string,
@@ -334,7 +322,6 @@ export async function tryClaimSchedule(
 
 /** Release the lock and record the run's outcome. Called once per fire. */
 export async function recordScheduleRunOutcome(
-  _db: DbClient,
   args: {
     pluginId: string
     scheduleId: string
@@ -367,7 +354,6 @@ export async function recordScheduleRunOutcome(
  * for long-running jobs.
  */
 export async function markScheduleRunStarted(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   startedAtIso: string,
@@ -386,7 +372,6 @@ export async function markScheduleRunStarted(
  * registration upserts never touch `paused`. Cleared by `resumeSchedule`.
  */
 export async function pauseSchedule(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   pausedAtIso: string,
@@ -396,7 +381,6 @@ export async function pauseSchedule(
 
 /** Clear an operator/failure pause and reset the failure counter. */
 export async function resumeSchedule(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
 ): Promise<void> {
@@ -408,7 +392,6 @@ export async function resumeSchedule(
 // ---------------------------------------------------------------------------
 
 export async function insertScheduleRun(
-  _db: DbClient,
   run: {
     id: string
     pluginId: string
@@ -427,7 +410,6 @@ export async function insertScheduleRun(
 }
 
 export async function finalizeScheduleRun(
-  _db: DbClient,
   runId: string,
   outcome: { finishedAt: string; status: ScheduleStatus; error: string | null; durationMs: number },
 ): Promise<void> {
@@ -441,7 +423,6 @@ export async function finalizeScheduleRun(
 }
 
 export async function listRecentRuns(
-  _db: DbClient,
   pluginId: string,
   scheduleId: string,
   limit = 20,
@@ -460,7 +441,6 @@ export async function listRecentRuns(
  * to bound storage without blocking the hot path.
  */
 export async function trimScheduleRunHistory(
-  _db: DbClient,
   keepPerSchedule = 200,
 ): Promise<void> {
   await getConvex().mutation(api.pluginSchedules.trimRunHistory, { keepPerSchedule })
@@ -472,6 +452,6 @@ export async function trimScheduleRunHistory(
  * `plugin_schedules`, which cascades), so without this sweep the history
  * rows would outlive the plugin row forever.
  */
-export async function clearPluginScheduleRuns(_db: DbClient, pluginId: string): Promise<void> {
+export async function clearPluginScheduleRuns(pluginId: string): Promise<void> {
   await getConvex().mutation(api.pluginSchedules.clearRunsForPlugin, { pluginId })
 }

@@ -1,13 +1,12 @@
 /**
  * AI runtime boot hooks.
  *
- *   - `startConversationPurgeTick(db)` — registers a `setInterval` that
+ *   - `startConversationPurgeTick()` — registers a `setInterval` that
  *      hard-deletes soft-deleted conversations older than 30 days.
  *
- * Called from `server/index.ts` after migrations + system role sync.
+ * Called from `server/index.ts` after system role sync.
  */
 
-import type { DbClient } from '../db/client'
 import { purgeSoftDeletedOlderThan } from './conversations/store'
 
 const ONE_HOUR_MS = 60 * 60 * 1000
@@ -27,11 +26,11 @@ let purgeTimer: ReturnType<typeof setInterval> | null = null
  * (`ai_conv_deleted_idx` partial index). A backlog of weeks of soft-deleted
  * conversations would still finish well inside a single tick.
  */
-export function startConversationPurgeTick(db: DbClient): void {
+export function startConversationPurgeTick(): void {
   if (purgeTimer) return
   // Fire-and-forget — never propagate the purge error to anyone.
   const runOnce = () => {
-    runPurgeOnce(db).catch((err) => {
+    runPurgeOnce().catch((err) => {
       console.error('[ai/boot] purge tick failed:', err)
     })
   }
@@ -39,9 +38,9 @@ export function startConversationPurgeTick(db: DbClient): void {
   purgeTimer = setInterval(runOnce, ONE_HOUR_MS)
 }
 
-async function runPurgeOnce(db: DbClient): Promise<void> {
+async function runPurgeOnce(): Promise<void> {
   const cutoff = new Date(Date.now() - THIRTY_DAYS_MS).toISOString()
-  const count = await purgeSoftDeletedOlderThan(db, cutoff)
+  const count = await purgeSoftDeletedOlderThan(cutoff)
   if (count > 0) {
     console.log(`[ai/boot] Purged ${count} soft-deleted conversation(s) older than 30 days.`)
   }

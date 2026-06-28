@@ -14,7 +14,6 @@
 import { jsonResponse } from '../../http'
 import { requireCapability } from '../../auth/authz'
 import { resolveTimeZone } from '../../time'
-import type { DbClient } from '../../db/client'
 import {
   getUsageByDay,
   getUsageByModel,
@@ -25,34 +24,32 @@ import {
 
 export function tryHandleAiAudit(
   req: Request,
-  db: DbClient,
   url: URL,
   pathname: string,
 ): Promise<Response> | null {
   if (pathname !== '/admin/api/ai/audit') return null
-  return handleAuditList(req, db, url)
+  return handleAuditList(req, url)
 }
 
 async function handleAuditList(
   req: Request,
-  db: DbClient,
   url: URL,
 ): Promise<Response> {
   if (req.method !== 'GET') {
     return jsonResponse({ error: 'Method not allowed' }, { status: 405 })
   }
-  const userOrResponse = await requireCapability(req, db, 'ai.audit.read')
+  const userOrResponse = await requireCapability(req, 'ai.audit.read')
   if (userOrResponse instanceof Response) return userOrResponse
 
   const sinceIso = resolveSince(url.searchParams.get('since'))
   const timeZone = resolveTimeZone(url.searchParams.get('tz'))
 
   const [totals, byUser, byScope, byModel, byDay] = await Promise.all([
-    getUsageTotals(db, sinceIso),
-    getUsageByUser(db, sinceIso),
-    getUsageByScope(db, sinceIso),
-    getUsageByModel(db, sinceIso),
-    getUsageByDay(db, sinceIso, timeZone),
+    getUsageTotals(sinceIso),
+    getUsageByUser(sinceIso),
+    getUsageByScope(sinceIso),
+    getUsageByModel(sinceIso),
+    getUsageByDay(sinceIso, timeZone),
   ])
 
   return jsonResponse({

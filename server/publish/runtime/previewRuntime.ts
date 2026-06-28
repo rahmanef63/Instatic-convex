@@ -7,7 +7,6 @@ import type { PublishedRuntimePackageImportmap } from '@core/publisher'
 import { prefetchLoopData } from '../loopPrefetch'
 import { prefetchMediaAssets } from '../mediaPrefetch'
 import { collectFrontendInjections, injectFrontendAssets } from '../frontendInjections'
-import type { DbClient } from '../../db/client'
 import {
   buildSiteRuntimeScripts,
   type BuiltRuntimeAssetFile,
@@ -32,13 +31,6 @@ interface RuntimePreviewDocumentInput {
   dependencyNodeModulesDir?: string
   breakpointId?: string
   templateContext?: TemplateRenderDataContext
-  /**
-   * Optional DB client — when supplied, every `base.loop` node on the
-   * page is pre-fetched against the database, so loops render with real
-   * data in the editor's runtime preview (iframe canvas). Without it,
-   * loops emit a "no resolved data" comment.
-   */
-  db?: DbClient
 }
 
 interface RuntimePreviewDocumentResult extends SiteRuntimeBuildResult {
@@ -76,12 +68,10 @@ export async function buildRuntimePreviewDocument(
       runtimePackageImportmap = { body: serialized.body, sha256: serialized.sha256 }
     }
   }
-  const [loopData, mediaAssets] = input.db
-    ? await Promise.all([
-        prefetchLoopData(input.page, input.site, input.db),
-        prefetchMediaAssets(input.page, input.site, input.registry, input.db),
-      ])
-    : [undefined, undefined]
+  const [loopData, mediaAssets] = await Promise.all([
+    prefetchLoopData(input.page, input.site),
+    prefetchMediaAssets(input.page, input.site, input.registry),
+  ])
   const baseHtml = publishPage(input.page, input.site, input.registry, {
     breakpointId: input.breakpointId,
     templateContext: input.templateContext,
@@ -106,9 +96,7 @@ export async function buildRuntimePreviewDocument(
   // preview can hook frontend injection (which IS shared) and emit the
   // same CSP envelope; full HTML filtering is reserved for the real
   // publish path.
-  const html = input.db
-    ? injectFrontendAssets(baseHtml, await collectFrontendInjections(input.db))
-    : baseHtml
+  const html = injectFrontendAssets(baseHtml, await collectFrontendInjections())
 
   return {
     ...runtimeBuild,

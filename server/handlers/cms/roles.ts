@@ -7,7 +7,6 @@
  *   DELETE /admin/api/cms/roles/:id  — delete a custom role (built-ins
  *                                       reject inside the repository)
  */
-import type { DbClient } from '../../db/client'
 import { requireAnyCapability, requireCapability, requireStepUp } from '../../auth/authz'
 import { createAuditEvent } from '../../repositories/audit'
 import {
@@ -45,27 +44,27 @@ const RolePatchBodySchema = Type.Partial(Type.Object({
 // Per-route handlers
 // ---------------------------------------------------------------------------
 
-async function handleListRoles(req: Request, db: DbClient): Promise<Response> {
-  const actor = await requireAnyCapability(req, db, ['roles.manage', 'users.manage'])
+async function handleListRoles(req: Request): Promise<Response> {
+  const actor = await requireAnyCapability(req, ['roles.manage', 'users.manage'])
   if (actor instanceof Response) return actor
-  return jsonResponse({ roles: await listRoles(db) })
+  return jsonResponse({ roles: await listRoles() })
 }
 
-async function handleCreateRole(req: Request, db: DbClient): Promise<Response> {
-  const actor = await requireCapability(req, db, 'roles.manage')
+async function handleCreateRole(req: Request): Promise<Response> {
+  const actor = await requireCapability(req, 'roles.manage')
   if (actor instanceof Response) return actor
-  const stepUp = await requireStepUp(req, db, actor)
+  const stepUp = await requireStepUp(req, actor)
   if (stepUp) return stepUp
   const body = await readValidatedBody(req, RoleCreateBodySchema)
   if (!body) return badRequest('Invalid role payload')
   try {
-    const role = await createCustomRole(db, {
+    const role = await createCustomRole({
       name: body.name,
       slug: body.slug,
       description: body.description ?? '',
       capabilities: normalizeCapabilities(body.capabilities),
     })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: actor.id,
       action: 'role.create',
       targetType: 'role',
@@ -81,24 +80,23 @@ async function handleCreateRole(req: Request, db: DbClient): Promise<Response> {
 
 async function handleUpdateRole(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const actor = await requireCapability(req, db, 'roles.manage')
+  const actor = await requireCapability(req, 'roles.manage')
   if (actor instanceof Response) return actor
-  const stepUp = await requireStepUp(req, db, actor)
+  const stepUp = await requireStepUp(req, actor)
   if (stepUp) return stepUp
   const body = await readValidatedBody(req, RolePatchBodySchema)
   if (!body) return badRequest('Invalid role payload')
   try {
-    const role = await updateRole(db, params.id, {
+    const role = await updateRole(params.id, {
       name: body.name,
       slug: body.slug,
       description: body.description,
       capabilities: body.capabilities ? normalizeCapabilities(body.capabilities) : undefined,
     })
     if (!role) return jsonResponse({ error: 'Role not found' }, { status: 404 })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: actor.id,
       action: 'role.update',
       targetType: 'role',
@@ -114,17 +112,16 @@ async function handleUpdateRole(
 
 async function handleDeleteRole(
   req: Request,
-  db: DbClient,
   params: RouteParams,
 ): Promise<Response> {
-  const actor = await requireCapability(req, db, 'roles.manage')
+  const actor = await requireCapability(req, 'roles.manage')
   if (actor instanceof Response) return actor
-  const stepUp = await requireStepUp(req, db, actor)
+  const stepUp = await requireStepUp(req, actor)
   if (stepUp) return stepUp
   try {
-    const deletedRole = await deleteCustomRole(db, params.id)
+    const deletedRole = await deleteCustomRole(params.id)
     if (!deletedRole) return jsonResponse({ error: 'Role not found' }, { status: 404 })
-    await createAuditEvent(db, {
+    await createAuditEvent({
       actorUserId: actor.id,
       action: 'role.delete',
       targetType: 'role',
@@ -157,6 +154,6 @@ const ROLES_ROUTES: readonly Route<[]>[] = [
   },
 ]
 
-export async function handleRolesRoutes(req: Request, db: DbClient): Promise<Response | null> {
-  return runRouteTable(req, db, ROLES_ROUTES)
+export async function handleRolesRoutes(req: Request): Promise<Response | null> {
+  return runRouteTable(req, ROLES_ROUTES)
 }

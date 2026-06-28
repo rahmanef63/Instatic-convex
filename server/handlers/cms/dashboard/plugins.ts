@@ -3,7 +3,7 @@
  * errored) plus the 8 most-recently-installed rows with their resolved
  * icon URLs.
  */
-import type { DbClient } from '../../../db/client'
+import { listInstalledPlugins } from '../../../repositories/plugins'
 import type { PluginsStats, PluginsStatsRow } from './types'
 
 const ROW_LIMIT = 8
@@ -14,56 +14,51 @@ const ROW_LIMIT = 8
  *   • total       — every installed plugin row
  *   • active      — rows with enabled=true AND lifecycle_status='active'
  *   • disabled    — rows with enabled=false OR lifecycle_status='disabled'
- *   • errored     — rows with lifecycle_status='error' (problem state)
+ *   • errored     — rows with lifecycle_status='error' (problem state),
+ *                   plus rows whose manifest failed to parse (broken).
  *   • rows        — up to 8 most-recently-installed plugins (id/name/
  *                   version/state/icon) for the widget's body list
  *
  * `state` collapses `enabled` × `lifecycle_status` into a single value
  * the widget can dot-color directly. `'installed'` lifecycle rows show
- * as `'disabled'` for the widget (not yet activated).
+ * as `'disabled'` for the widget (not yet activated). The repository
+ * returns plugins newest-installed first.
  */
-export async function readPluginsStats(db: DbClient): Promise<PluginsStats> {
-  const { rows } = await db<{
-    id: string
-    name: string
-    version: string
-    enabled: boolean | number
-    lifecycle_status: string
-    manifest_json: unknown
-  }>`
-    select id, name, version, enabled, lifecycle_status, manifest_json
-    from installed_plugins
-    order by installed_at desc
-  `
+export async function readPluginsStats(): Promise<PluginsStats> {
+  const installed = await listInstalledPlugins()
 
   let active = 0
   let disabled = 0
   let errored = 0
   const out: PluginsStatsRow[] = []
 
-  for (const r of rows) {
-    const state = computeRowState(r.enabled, r.lifecycle_status)
+  for (const result of installed) {
+    let row: PluginsStatsRow
+    if (result.kind === 'broken') {
+      row = { id: result.id, name: result.name, version: result.version, state: 'error', iconUrl: null }
+    } else {
+      const p = result.plugin
+      row = {
+        id: p.id,
+        name: p.name,
+        version: p.version,
+        state: computeRowState(p.enabled, p.lifecycleStatus),
+        iconUrl: resolveManifestIconUrl(p.manifest),
+      }
+    }
 
-    if (state === 'active') active += 1
-    else if (state === 'error') errored += 1
+    if (row.state === 'active') active += 1
+    else if (row.state === 'error') errored += 1
     else disabled += 1
 
     // Cap the per-row payload at the 8 most recent; the counts above
     // include every plugin so the widget can show "12 plugins · 3
     // disabled" alongside the truncated list.
-    if (out.length < ROW_LIMIT) {
-      out.push({
-        id: r.id,
-        name: r.name,
-        version: r.version,
-        state,
-        iconUrl: resolveManifestIconUrl(r.manifest_json),
-      })
-    }
+    if (out.length < ROW_LIMIT) out.push(row)
   }
 
   return {
-    total: rows.length,
+    total: installed.length,
     active,
     disabled,
     errored,
@@ -72,17 +67,15 @@ export async function readPluginsStats(db: DbClient): Promise<PluginsStats> {
 }
 
 /**
- * Collapse `enabled` × `lifecycle_status` into the single state value
- * the widget renders as a dot color. SQLite returns booleans as 0/1
- * integers; Postgres returns proper booleans — handle both.
+ * Collapse `enabled` × `lifecycleStatus` into the single state value
+ * the widget renders as a dot color.
  */
 function computeRowState(
-  enabled: boolean | number,
+  enabled: boolean,
   lifecycle: string,
 ): PluginsStatsRow['state'] {
   if (lifecycle === 'error') return 'error'
-  const isEnabled = enabled === true || enabled === 1
-  if (isEnabled && lifecycle === 'active') return 'active'
+  if (enabled && lifecycle === 'active') return 'active'
   return 'disabled'
 }
 

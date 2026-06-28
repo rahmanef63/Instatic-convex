@@ -23,7 +23,6 @@
  * artefact writes, cache bump) lives in `server/publish/publishRow.ts` and
  * calls down into this repository.
  */
-import type { DbClient } from '../../db/client'
 import { api, getConvex } from '../../convex/client'
 import type { DataRow, DataRowVersion, DataRowRedirect, PublishedDataRow } from '@core/data/schemas'
 import { normalizeRouteBase } from '@core/templates/templateMatching'
@@ -86,7 +85,6 @@ export function previousRouteChanged(previous: PreviousPublishedRoute, currentSl
  * lock, artefact bake, and cache bump are owned by `server/publish/publishRow.ts`.
  */
 export async function persistDataRowPublish(
-  _db: DbClient,
   rowId: string,
   /**
    * The user attributed as the publisher. `null` is allowed for system
@@ -115,7 +113,6 @@ export async function persistDataRowPublish(
  * joining the table into every other query.
  */
 export async function getRowTableRouteInfo(
-  _db: DbClient,
   rowId: string,
 ): Promise<RowTableRouteInfo | null> {
   const info = await getConvex().query(api.dataPublish.rowTableRouteInfo, { rowId })
@@ -132,7 +129,6 @@ export async function getRowTableRouteInfo(
  * route after a soft delete (ISS-039).
  */
 export async function getRowTableRouteBase(
-  _db: DbClient,
   rowId: string,
 ): Promise<string | null> {
   return getConvex().query(api.dataPublish.rowTableRouteBase, { rowId })
@@ -157,7 +153,7 @@ interface PublishedRowRoute {
  * without it, the slot swap would strand every row artefact written by
  * incremental publishes.
  */
-export async function listPublishedRowRoutes(_db: DbClient): Promise<PublishedRowRoute[]> {
+export async function listPublishedRowRoutes(): Promise<PublishedRowRoute[]> {
   const rows = await getConvex().query(api.dataPublish.listPublishedRowRoutes, {})
   return rows.map((row) => ({
     rowId: row.rowId,
@@ -178,7 +174,6 @@ export async function listPublishedRowRoutes(_db: DbClient): Promise<PublishedRo
  * query dialect-naive (no JSON-extract functions, no PG-specific operators).
  */
 export async function getPublishedDataRowByRoute(
-  _db: DbClient,
   tableRouteBase: string,
   rowSlug: string,
 ): Promise<PublishedDataRow | null> {
@@ -220,7 +215,6 @@ export async function getPublishedDataRowByRoute(
 }
 
 export async function getDataRowRedirectByRoute(
-  _db: DbClient,
   tableRouteBase: string,
   rowSlug: string,
 ): Promise<DataRowRedirect | null> {
@@ -257,12 +251,12 @@ export interface ExportableRedirect {
 }
 
 /** Every redirect, raw, for a full-site export. */
-export async function listExportableRedirects(_db: DbClient): Promise<ExportableRedirect[]> {
+export async function listExportableRedirects(): Promise<ExportableRedirect[]> {
   return getConvex().query(api.dataPublish.listExportableRedirects, {})
 }
 
 /** Wipe all redirects — used by the `replace` import strategy before reinsert. */
-export async function deleteAllDataRowRedirects(_db: DbClient): Promise<void> {
+export async function deleteAllDataRowRedirects(): Promise<void> {
   await getConvex().mutation(api.dataPublish.deleteAllRedirects, {})
 }
 
@@ -270,7 +264,7 @@ export async function deleteAllDataRowRedirects(_db: DbClient): Promise<void> {
  * Insert a redirect preserving its original id, upserting on the unique
  * (from_route_base, from_slug) source key. Used by the bundle import handler.
  */
-export async function importDataRowRedirect(_db: DbClient, input: ExportableRedirect): Promise<void> {
+export async function importDataRowRedirect(input: ExportableRedirect): Promise<void> {
   await getConvex().mutation(api.dataPublish.importRedirect, {
     id: input.id,
     tableId: input.tableId,

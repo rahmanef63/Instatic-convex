@@ -11,7 +11,6 @@
  *
  *   POST /admin/api/cms/plugins/:id/pack/install
  */
-import type { DbClient } from '../../../db/client'
 import type { AuthUser } from '../../../repositories/users'
 import { createAuditEvent } from '../../../repositories/audit'
 import { getInstalledPlugin } from '../../../repositories/plugins'
@@ -55,7 +54,6 @@ export interface PluginPackSummary {
  * `POST /pack/install` route.
  */
 async function installPluginPackToSite(
-  db: DbClient,
   plugin: InstalledPlugin,
   uploadsDir: string,
   actorUserId: string,
@@ -66,16 +64,16 @@ async function installPluginPackToSite(
   const raw = await loadPluginPackFile(uploadsDir, plugin.manifest.assetBasePath, plugin.manifest.pack.path)
   const pack = parsePluginPack(plugin.id, raw)
 
-  const shell = await getDraftSite(db)
+  const shell = await getDraftSite()
   if (!shell) return null
 
   // Assemble a temporary SiteDocument for the pack merge function.
   // VCs and layouts are included so applyPluginPackToSite can detect
   // replaced ids.
   const [pageRows, vcRows, layoutRows] = await Promise.all([
-    listDataRows(db, 'pages'),
-    listDataRows(db, 'components'),
-    listDataRows(db, 'layouts'),
+    listDataRows('pages'),
+    listDataRows('components'),
+    listDataRows('layouts'),
   ])
   const { visualComponentFromRow } = await import('../../../../src/core/data/componentFromRow')
   const existingVCs = vcRows.flatMap((r) => {
@@ -97,16 +95,16 @@ async function installPluginPackToSite(
 
   // Extract shell (strip pages, visualComponents, and layouts) and save
   const { pages: packPages, visualComponents: _vcs, layouts: _layouts, ...nextShell } = nextSiteDoc
-  await saveDraftSite(db, nextShell, actorUserId)
+  await saveDraftSite(nextShell, actorUserId)
 
   // Upsert pack pages as data_rows
   const existingPagesById = new Map(pageRows.map((r) => [r.id, r]))
   for (const page of packPages) {
     const cells = pageToCells(page)
     if (existingPagesById.has(page.id)) {
-      await saveDataRowDraft(db, page.id, { cells, slug: page.slug }, actorUserId)
+      await saveDataRowDraft(page.id, { cells, slug: page.slug }, actorUserId)
     } else {
-      await createDataRow(db, { id: page.id, tableId: 'pages', cells, slug: page.slug }, actorUserId)
+      await createDataRow({ id: page.id, tableId: 'pages', cells, slug: page.slug }, actorUserId)
     }
   }
 
@@ -116,9 +114,9 @@ async function installPluginPackToSite(
     const cells = visualComponentToCells(vc)
     const slug = vcSlugFromName(vc.name)
     if (existingVCsById.has(vc.id)) {
-      await saveDataRowDraft(db, vc.id, { cells, slug }, actorUserId)
+      await saveDataRowDraft(vc.id, { cells, slug }, actorUserId)
     } else {
-      await createDataRow(db, { id: vc.id, tableId: 'components', cells, slug }, actorUserId)
+      await createDataRow({ id: vc.id, tableId: 'components', cells, slug }, actorUserId)
     }
   }
 
@@ -128,13 +126,13 @@ async function installPluginPackToSite(
     const cells = savedLayoutToCells(layout)
     const slug = layoutSlugFromName(layout.name)
     if (existingLayoutRowsById.has(layout.id)) {
-      await saveDataRowDraft(db, layout.id, { cells, slug }, actorUserId)
+      await saveDataRowDraft(layout.id, { cells, slug }, actorUserId)
     } else {
-      await createDataRow(db, { id: layout.id, tableId: 'layouts', cells, slug }, actorUserId)
+      await createDataRow({ id: layout.id, tableId: 'layouts', cells, slug }, actorUserId)
     }
   }
 
-  await createAuditEvent(db, {
+  await createAuditEvent({
     actorUserId,
     action: 'plugin.pack.install',
     targetType: 'plugin',
@@ -170,7 +168,6 @@ async function installPluginPackToSite(
  * pack just isn't synced.
  */
 export async function maybeAutoInstallPluginPack(
-  db: DbClient,
   plugin: InstalledPlugin,
   options: CmsHandlerOptions,
   user: AuthUser,
@@ -181,7 +178,7 @@ export async function maybeAutoInstallPluginPack(
   if (!plugin.grantedPermissions.includes('visualComponents.register')) return null
 
   try {
-    return await installPluginPackToSite(db, plugin, options.uploadsDir, user.id, req)
+    return await installPluginPackToSite(plugin, options.uploadsDir, user.id, req)
   } catch (err) {
     console.error(`[plugins:${plugin.id}] auto pack install failed`, err)
     return null
@@ -194,7 +191,6 @@ export async function maybeAutoInstallPluginPack(
 
 export async function handlePluginPackInstall(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
   user: AuthUser,
   pluginId: string,
@@ -204,7 +200,7 @@ export async function handlePluginPackInstall(
     return jsonResponse({ error: 'Uploads directory is not configured' }, { status: 500 })
   }
 
-  const result = await getInstalledPlugin(db, pluginId)
+  const result = await getInstalledPlugin(pluginId)
   if (!result) return pluginNotFound()
   if (result.kind === 'broken') {
     return badRequest(`Plugin "${pluginId}" has a corrupt manifest — remove and reinstall it`)
@@ -228,7 +224,7 @@ export async function handlePluginPackInstall(
   }
 
   try {
-    const summary = await installPluginPackToSite(db, plugin, options.uploadsDir, user.id, req)
+    const summary = await installPluginPackToSite(plugin, options.uploadsDir, user.id, req)
     if (!summary) {
       return badRequest('No draft site to install pack into; finish initial setup first.')
     }

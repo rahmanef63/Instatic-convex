@@ -1,4 +1,3 @@
-import type { DbClient } from '../db/client'
 import type { Static, TSchema } from '@sinclair/typebox'
 import { clientIp, originAllowed } from '../auth/security'
 import {
@@ -38,7 +37,6 @@ const PUBLIC_FORM_SUBMIT_MAX_BODY_BYTES = 1024 * 1024
 
 export async function handlePublicFormRequest(
   req: Request,
-  db: DbClient,
   url: URL,
 ): Promise<Response | null> {
   const route = publicFormRoute(url.pathname)
@@ -47,11 +45,11 @@ export async function handlePublicFormRequest(
   if (!publicFormOriginAllowed(req)) {
     return jsonResponse({ error: 'Form submissions must come from this site.' }, { status: 403 })
   }
-  if (route === 'challenge') return handleChallenge(req, db)
-  return handleSubmit(req, db)
+  if (route === 'challenge') return handleChallenge(req)
+  return handleSubmit(req)
 }
 
-async function handleChallenge(req: Request, db: DbClient): Promise<Response> {
+async function handleChallenge(req: Request): Promise<Response> {
   const parsed = await readPublicFormBody(
     req,
     PublicFormChallengeBodySchema,
@@ -67,7 +65,7 @@ async function handleChallenge(req: Request, db: DbClient): Promise<Response> {
   const formDecision = publicFormChallengePerFormRateLimit.consume(`${ipKey}|${body.formId}`)
   if (!formDecision.ok) return rateLimited(formDecision.retryAfterMs)
 
-  const snapshot = await findPublishedFormSnapshot(db, body.pageId, body.formId)
+  const snapshot = await findPublishedFormSnapshot(body.pageId, body.formId)
   if (!snapshot) return jsonResponse({ error: 'Form not found' }, { status: 404 })
   if (!verifyPublicFormPageToken(body)) {
     return jsonResponse({ error: 'Invalid form page token' }, { status: 403 })
@@ -80,7 +78,7 @@ async function handleChallenge(req: Request, db: DbClient): Promise<Response> {
   })
 }
 
-async function handleSubmit(req: Request, db: DbClient): Promise<Response> {
+async function handleSubmit(req: Request): Promise<Response> {
   const parsed = await readPublicFormBody(
     req,
     PublicFormSubmitBodySchema,
@@ -104,7 +102,7 @@ async function handleSubmit(req: Request, db: DbClient): Promise<Response> {
   })
   if (!challenge) return badRequest('Invalid or expired form challenge')
 
-  const snapshot = await findPublishedFormSnapshot(db, body.pageId, body.formId)
+  const snapshot = await findPublishedFormSnapshot(body.pageId, body.formId)
   if (!snapshot) return jsonResponse({ error: 'Form not found' }, { status: 404 })
 
   const elapsedMs = Date.now() - challenge.issuedAt
@@ -119,7 +117,7 @@ async function handleSubmit(req: Request, db: DbClient): Promise<Response> {
     return badRequest('Invalid form submission')
   }
 
-  const table = await getDataTable(db, snapshot.targetTableId)
+  const table = await getDataTable(snapshot.targetTableId)
   if (!table || !isFormSubmissionTargetTable(table)) {
     return jsonResponse({ error: 'Form target not found' }, { status: 404 })
   }
@@ -133,7 +131,7 @@ async function handleSubmit(req: Request, db: DbClient): Promise<Response> {
     return jsonResponse({ error: 'Invalid form values', errors: validation.errors }, { status: 400 })
   }
 
-  const row = await createDataRow(db, {
+  const row = await createDataRow({
     tableId: table.id,
     cells: validation.cells,
     slug: '',
@@ -159,11 +157,10 @@ async function readPublicFormBody<T extends TSchema>(
 }
 
 async function findPublishedFormSnapshot(
-  db: DbClient,
   pageId: string,
   formId: string,
 ): Promise<PublishedFormSnapshot | null> {
-  const snapshot = await getLatestPublishedSiteSnapshot(db)
+  const snapshot = await getLatestPublishedSiteSnapshot()
   const page = snapshot?.site.pages.find((candidate) => candidate.id === pageId)
   if (!page) return null
   return derivePageFormSnapshots(page).find((candidate) => candidate.formId === formId) ?? null

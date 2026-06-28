@@ -20,7 +20,6 @@
  * per-page bake behaviour in `publishDraftSite`.
  */
 
-import type { DbClient } from '../db/client'
 import type { SiteCssBundle } from '@core/publisher'
 import { resolveTemplateChain } from '@core/templates'
 import { normalizeRouteBase } from '@core/templates/templateMatching'
@@ -60,16 +59,15 @@ function publicRowPath(routeBase: string, slug: string): string {
  * also pre-warms the cache visitors are about to read.
  */
 export async function bakePublishedDataRowArtefacts(
-  db: DbClient,
   slotDir: string,
   publishVersion: number,
 ): Promise<DataRowBakeResult> {
   const result: DataRowBakeResult = { baked: 0, cssBundles: [] }
 
-  const routes = await listPublishedRowRoutes(db)
+  const routes = await listPublishedRowRoutes()
   if (routes.length === 0) return result
 
-  const siteSnapshot = await getLatestSnapshotForVersion(db, publishVersion)
+  const siteSnapshot = await getLatestSnapshotForVersion(publishVersion)
   if (!siteSnapshot) return result
 
   // Tables without an entry-template chain have no public row routes —
@@ -88,16 +86,15 @@ export async function bakePublishedDataRowArtefacts(
     if (!hasEntryChain(route.tableSlug)) continue
     const urlPath = publicRowPath(route.tableRouteBase, route.rowSlug)
     try {
-      const row = await getPublishedDataRowByRoute(db, route.tableRouteBase, route.rowSlug)
+      const row = await getPublishedDataRowByRoute(route.tableRouteBase, route.rowSlug)
       if (!row) continue
       const syntheticUrl = new URL(`http://localhost${urlPath}`)
       const rendered = await renderPublishedDataRowTemplate(siteSnapshot, row, {
-        db,
         url: syntheticUrl,
         publishVersion,
       })
       if (!rendered) continue
-      const html = await applyPublishedHtmlPipeline(rendered, db)
+      const html = await applyPublishedHtmlPipeline(rendered)
       await writeArtefact(slotDir, urlPath, html)
       result.cssBundles.push(rendered.cssBundle)
       result.baked++

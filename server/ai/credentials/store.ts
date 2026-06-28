@@ -17,7 +17,6 @@
  * Gated by `ai-credentials-never-leak.test.ts` (Phase 1).
  */
 
-import type { DbClient } from '../../db/client'
 import { api, getConvex } from '../../convex/client'
 import { isoDateOrNull } from '@core/utils/isoDate'
 import {
@@ -156,7 +155,6 @@ export class CredentialError extends Error {
  * breaks the JSON-schema parse on the client.
  */
 export async function listCredentialsForUser(
-  _db: DbClient,
   userId: string,
 ): Promise<CredentialRecord[]> {
   const rows = await getConvex().query(api.aiCredentials.listForUser, { userId })
@@ -169,7 +167,6 @@ export async function listCredentialsForUser(
  * user — handlers should treat both as 404.
  */
 export async function readCredentialForUser(
-  _db: DbClient,
   userId: string,
   credentialId: string,
 ): Promise<CredentialRecord | null> {
@@ -252,7 +249,6 @@ export async function resolveCredentialForDriver(
  *   - missing url for 'baseUrl' mode — surfaced as 400
  */
 export async function createCredentialForUser(
-  _db: DbClient,
   userId: string,
   input: CreateCredentialInput,
 ): Promise<CredentialRecord> {
@@ -312,12 +308,11 @@ async function encryptKey(plaintext: string): Promise<EncryptedSecret> {
  * different user.
  */
 export async function updateCredentialForUser(
-  _db: DbClient,
   userId: string,
   credentialId: string,
   patch: UpdateCredentialInput,
 ): Promise<CredentialRecord | null> {
-  const existing = await readCredentialForUser(_db, userId, credentialId)
+  const existing = await readCredentialForUser(userId, credentialId)
   if (!existing) return null
 
   const nextLabel = patch.displayLabel ?? existing.displayLabel
@@ -380,7 +375,6 @@ export async function updateCredentialForUser(
  * Returns true when a row was deleted, false otherwise (404).
  */
 export async function deleteCredentialForUser(
-  _db: DbClient,
   userId: string,
   credentialId: string,
 ): Promise<boolean> {
@@ -407,7 +401,6 @@ export async function deleteCredentialForUser(
  * Best-effort: no error if the row vanishes mid-stream (cleanup race).
  */
 export async function touchCredentialLastUsed(
-  _db: DbClient,
   credentialId: string,
 ): Promise<void> {
   await getConvex().mutation(api.aiCredentials.touchLastUsed, { credentialId })

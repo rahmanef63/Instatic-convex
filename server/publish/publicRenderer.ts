@@ -13,7 +13,6 @@ import { getPublishVersion } from './publishState'
 import type { Page } from '@core/page-tree'
 import type { SiteCssBundle } from '@core/publisher'
 import type { PublishedDataRow } from '@core/data/schemas'
-import type { DbClient } from '../db/client'
 import type { PublishedPageSnapshot } from '../repositories/publish'
 
 /**
@@ -64,7 +63,6 @@ export interface RendererOutput {
 }
 
 interface RenderPublishedSnapshotContext {
-  db: DbClient
   /** Optional request URL — when present, drives per-loop pagination. */
   url?: URL
   /**
@@ -95,8 +93,8 @@ async function renderMergedTemplate(
   const cssBundle = buildPublishedSiteCssBundle(snapshot.site, registry, merged, publishVersion)
   const moduleJsMap = buildPublishedSiteModuleJsMap(snapshot.site, registry)
   const [loopData, mediaAssets] = await Promise.all([
-    prefetchLoopData(merged, snapshot.site, ctx.db, ctx.url),
-    prefetchMediaAssets(merged, snapshot.site, registry, ctx.db),
+    prefetchLoopData(merged, snapshot.site, ctx.url),
+    prefetchMediaAssets(merged, snapshot.site, registry),
   ])
   const published = publishPage(merged, snapshot.site, registry, {
     templateContext,
