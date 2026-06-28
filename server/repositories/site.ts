@@ -10,6 +10,16 @@
  * Storage format inside `settings_json`:
  *   { cmsSiteSchemaVersion: 1, site: <SiteShell without name> }
  * The `name` is stored in the dedicated `site.name` column.
+ *
+ * Convex port: this file is now a thin adapter over `convex/site.ts` (see
+ * docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
+ * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
+ * so handlers keep calling these unchanged. The shell (de)serialization
+ * (`readStoredShell` + `validateSite` + the `@core/page-tree` helpers) stays on
+ * the Bun side; the Convex function returns / accepts only the raw `SiteRow`
+ * columns. It is dropped wholesale when `server/db/*` is retired (§7).
+ *
+ * @see convex/site.ts — the Convex query/mutation functions
  */
 import type { SiteShell } from '@core/page-tree'
 import {
@@ -23,6 +33,7 @@ import { normalizeSitePackageJson } from '@core/site-dependencies/manifest'
 import { normalizeSiteRuntimeConfig } from '@core/site-runtime'
 import type { DbClient } from '../db/client'
 import type { SiteRow } from '../types'
+import { api, getConvex } from '../convex/client'
 
 const CMS_SITE_SCHEMA_VERSION = 1
 
@@ -67,31 +78,21 @@ function readStoredShell(row: SiteRow): SiteShell {
   }
 }
 
-export async function getDraftSite(db: DbClient): Promise<SiteShell | null> {
-  const { rows } = await db<SiteRow>`
-    select id, name, settings_json, created_at, updated_at
-    from site
-    where id = 'default'
-    limit 1
-  `
-  const row = rows[0]
+export async function getDraftSite(_db: DbClient): Promise<SiteShell | null> {
+  const row = await getConvex().query(api.site.getDraft, {})
   if (!row) return null
 
-  const rawShell = readStoredShell(row)
+  const rawShell = readStoredShell(row as SiteRow)
   return validateSite(rawShell)
 }
 
 export async function saveDraftSite(
-  db: DbClient,
+  _db: DbClient,
   shell: SiteShell,
   _actorUserId: string | null = null,
 ): Promise<void> {
-  await db`
-    insert into site (id, name, settings_json)
-    values ('default', ${shell.name}, ${shellToStorage(shell)})
-    on conflict (id) do update
-      set name = excluded.name,
-          settings_json = excluded.settings_json,
-          updated_at = current_timestamp
-  `
+  await getConvex().mutation(api.site.saveDraft, {
+    name: shell.name,
+    settings: shellToStorage(shell),
+  })
 }

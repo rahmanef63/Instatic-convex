@@ -1,7 +1,7 @@
-import { nanoid } from 'nanoid'
 import type { DbClient } from '../db/client'
 import { Type, type Static } from '@core/utils/typeboxHelpers'
 import { compiledCheck, compiledDecode } from '@core/utils/typeboxCompiler'
+import { api, getConvex } from '../convex/client'
 
 const AuditActionSchema = Type.Union([
   Type.Literal('login.success'),
@@ -77,11 +77,6 @@ interface AuditUserLabelRow {
   display_name: string
 }
 
-interface AuditRoleLabelRow {
-  id: string
-  name: string
-}
-
 interface AuditEventLabels {
   actorLabel: string | null
   targetLabel: string | null
@@ -133,28 +128,6 @@ function rowToAuditEvent(row: AuditEventRow, metadata: AuditMetadata, labels: Au
   }
 }
 
-async function auditLabelMaps(db: DbClient): Promise<{
-  usersById: Map<string, string>
-  rolesById: Map<string, string>
-}> {
-  const [usersResult, rolesResult] = await Promise.all([
-    db<AuditUserLabelRow>`select id, email, display_name from users`,
-    db<AuditRoleLabelRow>`select id, name from roles`,
-  ])
-
-  const usersById = new Map<string, string>()
-  for (const row of usersResult.rows) {
-    usersById.set(row.id, userAuditLabel(row))
-  }
-
-  const rolesById = new Map<string, string>()
-  for (const row of rolesResult.rows) {
-    rolesById.set(row.id, row.name)
-  }
-
-  return { usersById, rolesById }
-}
-
 function labelsForAuditEvent(
   row: AuditEventRow,
   metadata: AuditMetadata,
@@ -178,7 +151,7 @@ function labelsForAuditEvent(
 }
 
 export async function createAuditEvent(
-  db: DbClient,
+  _db: DbClient,
   input: {
     actorUserId: string | null
     action: AuditAction
@@ -189,30 +162,31 @@ export async function createAuditEvent(
     userAgent?: string | null
   },
 ): Promise<void> {
-  await db`
-    insert into audit_events (id, actor_user_id, action, target_type, target_id, metadata_json, ip_address, user_agent)
-    values (
-      ${nanoid()},
-      ${input.actorUserId},
-      ${input.action},
-      ${input.targetType ?? null},
-      ${input.targetId ?? null},
-      ${input.metadata ?? {}},
-      ${input.ipAddress ?? null},
-      ${input.userAgent ?? null}
-    )
-  `
+  await getConvex().mutation(api.audit.create, {
+    actorUserId: input.actorUserId,
+    action: input.action,
+    targetType: input.targetType ?? null,
+    targetId: input.targetId ?? null,
+    metadata: input.metadata ?? {},
+    ipAddress: input.ipAddress ?? null,
+    userAgent: input.userAgent ?? null,
+  })
 }
 
-export async function listAuditEvents(db: DbClient, limit = 100): Promise<AuditEvent[]> {
-  const { rows } = await db<AuditEventRow>`
-    select id, actor_user_id, action, target_type, target_id, metadata_json, ip_address, user_agent, created_at
-    from audit_events
-    order by created_at desc
-    limit ${limit}
-  `
-  const maps = await auditLabelMaps(db)
-  return rows.map((row) => {
+export async function listAuditEvents(_db: DbClient, limit = 100): Promise<AuditEvent[]> {
+  const { events, users, roles } = await getConvex().query(api.audit.listEvents, { limit })
+
+  const usersById = new Map<string, string>()
+  for (const user of users) usersById.set(user.id, userAuditLabel(user))
+  const rolesById = new Map<string, string>()
+  for (const role of roles) rolesById.set(role.id, role.name)
+  const maps = { usersById, rolesById }
+
+  return events.map((event) => {
+    // `action` is a CHECK-enum column; the Convex validator widens it to
+    // `string`, so narrow it back to `AuditAction` (the same trust the SQL
+    // `db<AuditEventRow>` row typing applied).
+    const row: AuditEventRow = { ...event, action: event.action as AuditAction }
     const metadata = normalizeMetadata(row.metadata_json)
     return rowToAuditEvent(row, metadata, labelsForAuditEvent(row, metadata, maps))
   })

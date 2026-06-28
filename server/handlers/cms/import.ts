@@ -32,28 +32,14 @@ import { join } from 'node:path'
 import { assertPathWithin } from '../../util/pathWithin'
 import type { DbClient } from '../../db/client'
 import { requireCapability, requireStepUp, userHasCapability } from '../../auth/authz'
-import { saveDraftSite } from '../../repositories/site'
-import {
-  listDataTables,
-  createDataTable,
-  updateDataTable,
-  insertDataTableIfAbsent,
-} from '../../repositories/data/tables'
-import {
-  listDataRows,
-  upsertDataRow,
-  insertDataRowIfAbsent,
-  replaceDataRow,
-  type DataRowImportInput,
-} from '../../repositories/data/rows'
 import { importMediaAsset, assignAssetToFolders } from '../../repositories/media'
-import {
-  deleteAllDataRowRedirects,
-  importDataRowRedirect,
-} from '../../repositories/data/publish'
-import { deleteAllMediaFolders, importMediaFolder } from '../../repositories/mediaFolders'
+import { api, getConvex } from '../../convex/client'
 import { jsonResponse, readValidatedBody } from '../../http'
 import { parseValue } from '@core/utils/typeboxHelpers'
+import { normalizeRouteBase } from '@core/templates/templateMatching'
+import { normalizeDataTableFields } from '@core/data/fields'
+import type { SiteShell } from '@core/page-tree'
+import type { DataTable, DataRow } from '@core/data/schemas'
 import {
   SiteBundleSchema,
   ImportStrategySchema,
@@ -62,8 +48,59 @@ import {
 } from '@core/data/bundleSchema'
 import { CMS_API_PREFIX, type CmsHandlerOptions } from './shared'
 
-// The four system table ids that are always seeded and never deleted.
-const SYSTEM_TABLE_IDS = new Set(['posts', 'pages', 'components', 'layouts'])
+const CMS_SITE_SCHEMA_VERSION = 1
+
+/**
+ * Prepare a bundle `DataTable` for the import mutation: apply the `@core`
+ * route/field normalisers Bun-side (they can't run in the Convex V8 runtime)
+ * and stringify the fields blob. Mirrors `createDataTable`/`updateDataTable` in
+ * `server/repositories/data/tables.ts`.
+ */
+function prepareTable(table: DataTable) {
+  return {
+    id: table.id,
+    name: table.name,
+    slug: table.slug,
+    kind: table.kind,
+    routeBase: normalizeRouteBase(table.routeBase ?? table.slug),
+    singularLabel: table.singularLabel,
+    pluralLabel: table.pluralLabel,
+    primaryFieldId: table.primaryFieldId,
+    fieldsJson: JSON.stringify(normalizeDataTableFields(table.fields ?? [])),
+  }
+}
+
+/**
+ * Prepare a bundle `DataRow` for the import mutation. User-ref columns are
+ * dropped on import; `createdAt`/`updatedAt` default to now when absent (mirror
+ * of `importArgs` in `server/repositories/data/rows/import.ts`).
+ */
+function prepareRow(row: DataRow) {
+  const now = new Date().toISOString()
+  return {
+    id: row.id,
+    tableId: row.tableId,
+    cells: row.cells,
+    slug: row.slug,
+    status: row.status,
+    publishedAt: row.publishedAt ?? null,
+    createdAt: row.createdAt ?? now,
+    updatedAt: row.updatedAt ?? now,
+  }
+}
+
+/**
+ * Prepare the site shell for the import mutation: split the name out and
+ * stringify the storage envelope (mirror of `shellToStorage` +
+ * `saveDraftSite` in `server/repositories/site.ts`).
+ */
+function prepareSite(shell: SiteShell) {
+  const { name, ...rest } = shell
+  return {
+    name,
+    settingsJson: JSON.stringify({ cmsSiteSchemaVersion: CMS_SITE_SCHEMA_VERSION, site: rest }),
+  }
+}
 
 /**
  * Order folders so every parent precedes its children — `media_folders.parent_id`
@@ -159,205 +196,54 @@ export async function handleImportRoute(
   const importedFolderIds = new Set<string>()
 
   // ---------------------------------------------------------------------------
-  // DB transaction
+  // DB writes — each strategy is ONE atomic Convex mutation
+  // (docs/CONVEX-MIGRATION.md §3 #4–#6). All bundle parsing + normalisation is
+  // done Bun-side above; the prepared records cross the wire and every ctx.db
+  // operation runs inside a single mutation so a crash rolls the whole import
+  // back. Counters come back from the mutation.
   // ---------------------------------------------------------------------------
 
+  const preparedTables = bundle.tables.map(prepareTable)
+  const preparedRows = bundle.rows.map(prepareRow)
+  const preparedSite = bundle.site ? prepareSite(bundle.site) : undefined
+
   if (strategy === 'replace') {
-    // Wipe-and-replace: delete all rows + custom tables, then reimport.
-    await db.transaction(async (tx) => {
-      // 1. Delete ALL data rows (covers all tables)
-      await tx`delete from data_rows`
+    // Folder ids that land in `replace` — the handler knows them up front (every
+    // bundle folder is imported), so it builds the membership-restore set here
+    // rather than round-tripping it back from the mutation.
+    const orderedFolders = bundle.mediaFolders
+      ? orderFoldersParentFirst(bundle.mediaFolders)
+      : undefined
+    if (orderedFolders) for (const folder of orderedFolders) importedFolderIds.add(folder.id)
 
-      // 2. Delete all non-system data tables
-      await tx`delete from data_tables where system = 0 or system = false`
-
-      // 3. Load remaining system tables so we know which bundle tables to
-      //    update vs insert.
-      const existingTables = await listDataTables(tx)
-      const existingTableIds = new Set(existingTables.map((t) => t.id))
-
-      // 4. Upsert tables from the bundle
-      for (const table of bundle.tables) {
-        if (existingTableIds.has(table.id)) {
-          // System table already present — update its fields
-          await updateDataTable(tx, table.id, {
-            name: table.name,
-            slug: table.slug,
-            routeBase: table.routeBase,
-            singularLabel: table.singularLabel,
-            pluralLabel: table.pluralLabel,
-            primaryFieldId: table.primaryFieldId,
-            fields: table.fields,
-          })
-          tablesAffected++
-        } else if (!SYSTEM_TABLE_IDS.has(table.id)) {
-          // Custom table — insert with original id
-          await createDataTable(tx, {
-            id: table.id,
-            name: table.name,
-            slug: table.slug,
-            kind: table.kind,
-            routeBase: table.routeBase,
-            singularLabel: table.singularLabel,
-            pluralLabel: table.pluralLabel,
-            primaryFieldId: table.primaryFieldId,
-            fields: table.fields,
-          })
-          tablesAffected++
-        }
-        // Bundle tables whose id is a known SYSTEM_TABLE_ID but wasn't seeded
-        // locally are silently skipped — they should never occur in practice.
-      }
-
-      // 5. Insert all rows (plain insert — table was just wiped)
-      for (const row of bundle.rows) {
-        const input: DataRowImportInput = {
-          id: row.id,
-          tableId: row.tableId,
-          cells: row.cells,
-          slug: row.slug,
-          status: row.status,
-          publishedAt: row.publishedAt,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-        }
-        await replaceDataRow(tx, input)
-        rowsInserted++
-      }
-
-      // 6. Replace the site shell (only when the bundle carries one)
-      if (bundle.site) {
-        await saveDraftSite(tx, bundle.site)
-      }
-
-      // 7. Media folder tree. `delete from data_rows` above does NOT touch
-      //    media_folders (unrelated FK), so wipe explicitly, then insert
-      //    parent-first to satisfy the self-referencing parent_id FK.
-      if (bundle.mediaFolders) {
-        await deleteAllMediaFolders(tx)
-        for (const folder of orderFoldersParentFirst(bundle.mediaFolders)) {
-          await importMediaFolder(tx, folder)
-          importedFolderIds.add(folder.id)
-          mediaFoldersImported++
-        }
-      }
-
-      // 8. Redirects. Old ones already cascade-deleted with their target rows
-      //    in step 1; wipe explicitly for clarity, then reinsert from the
-      //    bundle now that the target rows exist.
-      if (bundle.redirects) {
-        await deleteAllDataRowRedirects(tx)
-        for (const redirect of bundle.redirects) {
-          await importDataRowRedirect(tx, redirect)
-          redirectsImported++
-        }
-      }
+    const result = await getConvex().mutation(api.importExport.replaceAll, {
+      tables: preparedTables,
+      rows: preparedRows,
+      site: preparedSite,
+      mediaFolders: orderedFolders,
+      redirects: bundle.redirects,
     })
+    tablesAffected = result.tablesAffected
+    rowsInserted = result.rowsInserted
+    mediaFoldersImported = result.mediaFoldersImported
+    redirectsImported = result.redirectsImported
   } else if (strategy === 'merge-add') {
-    // Add what's missing; never overwrite existing content.
-    await db.transaction(async (tx) => {
-      // Tables: insert if absent, skip if the id already exists
-      for (const table of bundle.tables) {
-        const inserted = await insertDataTableIfAbsent(tx, {
-          id: table.id,
-          name: table.name,
-          slug: table.slug,
-          kind: table.kind,
-          routeBase: table.routeBase,
-          singularLabel: table.singularLabel,
-          pluralLabel: table.pluralLabel,
-          primaryFieldId: table.primaryFieldId,
-          fields: table.fields,
-        })
-        if (inserted) tablesAffected++
-      }
-
-      // Rows: insert if absent, skip if the id already exists
-      for (const row of bundle.rows) {
-        const input: DataRowImportInput = {
-          id: row.id,
-          tableId: row.tableId,
-          cells: row.cells,
-          slug: row.slug,
-          status: row.status,
-          publishedAt: row.publishedAt,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-        }
-        const inserted = await insertDataRowIfAbsent(tx, input)
-        if (inserted) {
-          rowsInserted++
-        } else {
-          rowsSkipped++
-        }
-      }
-
-      // Site shell: merge-add never overwrites the site shell — the local site
-      // has existing content that must not be destroyed by an additive import.
+    const result = await getConvex().mutation(api.importExport.mergeAdd, {
+      tables: preparedTables,
+      rows: preparedRows,
     })
+    tablesAffected = result.tablesAffected
+    rowsInserted = result.rowsInserted
+    rowsSkipped = result.rowsSkipped
   } else {
-    // merge-overwrite: upsert rows/tables; update existing with bundle values.
-    await db.transaction(async (tx) => {
-      // Pre-fetch all existing row ids for tables referenced in the bundle so
-      // we can classify each row as inserted vs replaced without per-row SELECTs.
-      const existingRowIds = new Set<string>()
-      for (const table of bundle.tables) {
-        const existing = await listDataRows(tx, table.id)
-        for (const r of existing) existingRowIds.add(r.id)
-      }
-
-      // Tables: insert if absent, update if already present
-      for (const table of bundle.tables) {
-        const inserted = await insertDataTableIfAbsent(tx, {
-          id: table.id,
-          name: table.name,
-          slug: table.slug,
-          kind: table.kind,
-          routeBase: table.routeBase,
-          singularLabel: table.singularLabel,
-          pluralLabel: table.pluralLabel,
-          primaryFieldId: table.primaryFieldId,
-          fields: table.fields,
-        })
-        if (!inserted) {
-          await updateDataTable(tx, table.id, {
-            name: table.name,
-            slug: table.slug,
-            routeBase: table.routeBase,
-            singularLabel: table.singularLabel,
-            pluralLabel: table.pluralLabel,
-            primaryFieldId: table.primaryFieldId,
-            fields: table.fields,
-          })
-        }
-        tablesAffected++
-      }
-
-      // Rows: upsert all; track inserted vs replaced via the pre-fetched set
-      for (const row of bundle.rows) {
-        const input: DataRowImportInput = {
-          id: row.id,
-          tableId: row.tableId,
-          cells: row.cells,
-          slug: row.slug,
-          status: row.status,
-          publishedAt: row.publishedAt,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-        }
-        await upsertDataRow(tx, input)
-        if (existingRowIds.has(row.id)) {
-          rowsReplaced++
-        } else {
-          rowsInserted++
-        }
-      }
-
-      // Site shell: overwrite if the bundle carries one
-      if (bundle.site) {
-        await saveDraftSite(tx, bundle.site)
-      }
+    const result = await getConvex().mutation(api.importExport.mergeUpdate, {
+      tables: preparedTables,
+      rows: preparedRows,
+      site: preparedSite,
     })
+    tablesAffected = result.tablesAffected
+    rowsInserted = result.rowsInserted
+    rowsReplaced = result.rowsReplaced
   }
 
   // ---------------------------------------------------------------------------

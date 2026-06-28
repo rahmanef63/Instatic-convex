@@ -18,16 +18,13 @@
 import { nanoid } from 'nanoid'
 import type { DbClient } from '../../db/client'
 import { hashPassword } from '../../auth/tokens'
-import { createSite, getSetupStatus } from '../../repositories/setup'
-import { createUser } from '../../repositories/users'
-import { createAuditEvent } from '../../repositories/audit'
-import { createDataRow } from '../../repositories/data'
+import { getSetupStatus } from '../../repositories/setup'
+import { api, getConvex } from '../../convex/client'
 import { createNode } from '@core/page-tree'
 import { pageToCells } from '../../../src/core/data/pageFromRow'
 import type { Page } from '@core/page-tree'
 import { badRequest, jsonResponse, methodNotAllowed, readValidatedBody } from '../../http'
 import { Type, safeParseValue } from '@core/utils/typeboxHelpers'
-import type { SiteRow } from '../../types'
 import { CMS_API_PREFIX, requestAuditContext } from './shared'
 
 export async function handleSetupRoutes(req: Request, db: DbClient): Promise<Response | null> {
@@ -65,40 +62,46 @@ export async function handleSetupRoutes(req: Request, db: DbClient): Promise<Res
     if (!email.includes('@')) return badRequest('Invalid email')
     if (password.length < 12) return badRequest('Password must be at least 12 characters')
 
-    return await db.transaction(async (tx) => {
-      await createSite(tx, siteName, {})
-      const owner = await createUser(tx, {
-        id: nanoid(),
+    // Create site + first owner + audit event + seed homepage as ONE atomic
+    // Convex mutation (docs/CONVEX-MIGRATION.md §3 #2). Password hashing and the
+    // page-tree construction stay Bun-side (crypto + @core never enter the
+    // Convex runtime); the owner/homepage nanoid ids are generated here so the
+    // audit `targetId` and the homepage author reference the same owner id.
+    const ownerId = nanoid()
+    const passwordHash = await hashPassword(password)
+    const rootNode = createNode('base.body')
+    const homePage: Page = {
+      id: nanoid(),
+      title: 'Home',
+      slug: 'index',
+      nodes: { [rootNode.id]: rootNode },
+      rootNodeId: rootNode.id,
+    }
+    const auditCtx = requestAuditContext(req)
+
+    await getConvex().mutation(api.setupTx.bootstrapInstall, {
+      siteName,
+      siteSettings: {},
+      owner: {
+        id: ownerId,
         email,
+        emailNormalized: email,
         displayName: email,
-        passwordHash: await hashPassword(password),
+        passwordHash,
         roleId: 'owner',
-        allowOwnerRole: true,
-      })
-      await createAuditEvent(tx, {
-        actorUserId: null,
+        status: 'active',
+      },
+      audit: {
         action: 'user.create',
         targetType: 'user',
-        targetId: owner.id,
         metadata: { roleId: 'owner', source: 'setup' },
-        ...requestAuditContext(req),
-      })
-      // Seed a starter homepage as a data_row in the 'pages' system table.
-      const rootNode = createNode('base.body')
-      const homePage: Page = {
-        id: nanoid(),
-        title: 'Home',
-        slug: 'index',
-        nodes: { [rootNode.id]: rootNode },
-        rootNodeId: rootNode.id,
-      }
-      await createDataRow(
-        tx,
-        { id: homePage.id, tableId: 'pages', cells: pageToCells(homePage), slug: homePage.slug },
-        owner.id,
-      )
-      return jsonResponse({ ok: true }, { status: 201 })
+        ipAddress: auditCtx.ipAddress,
+        userAgent: auditCtx.userAgent,
+      },
+      homePage: { id: homePage.id, cells: pageToCells(homePage), slug: homePage.slug },
     })
+
+    return jsonResponse({ ok: true }, { status: 201 })
   }
 
   return null
@@ -145,20 +148,21 @@ const StoredSiteIdentitySchema = Type.Object({
  * page tree, no plugin list, no user info — so this stays safe to serve
  * without auth.
  */
-async function loadPublicSiteIdentity(db: DbClient): Promise<PublicSiteIdentity> {
-  const { rows } = await db<SiteRow>`
-    select id, name, settings_json, created_at, updated_at
-    from site
-    where id = 'default'
-    limit 1
-  `
-  const row = rows[0]
+async function loadPublicSiteIdentity(_db: DbClient): Promise<PublicSiteIdentity> {
+  const row = await getConvex().query(api.setupTx.publicSiteRow, {})
   if (!row) return { name: null, faviconUrl: null }
 
-  // Validate at the boundary, then trust the parsed value. A malformed
-  // settings payload fails parsing and resolves to a null favicon — never a
-  // thrown error or a silently-wrong value.
-  const parsed = safeParseValue(StoredSiteIdentitySchema, row.settings_json)
+  // `settings_json` is an opaque string at rest in Convex (§6) — parse it, then
+  // validate at the boundary and trust the parsed value. A malformed payload
+  // (unparseable JSON or a non-conforming shape) resolves to a null favicon —
+  // never a thrown error or a silently-wrong value.
+  let storedSettings: unknown = {}
+  try {
+    storedSettings = JSON.parse(row.settings_json)
+  } catch {
+    storedSettings = {}
+  }
+  const parsed = safeParseValue(StoredSiteIdentitySchema, storedSettings)
   const faviconUrl = parsed.ok ? parsed.value.site?.settings?.faviconUrl ?? null : null
 
   return {
