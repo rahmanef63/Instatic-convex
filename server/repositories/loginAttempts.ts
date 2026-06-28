@@ -13,12 +13,20 @@
  * The table is append-only by convention; cleanup (retention) is left to a
  * future change set when audit volume warrants it. Rows are tiny.
  *
- * @see server/db/migrations-pg.ts:001_baseline — column definitions
- * @see server/auth/lockout.ts                  — policy that consumes this
+ * Convex port: this file is now a thin adapter over `convex/loginAttempts.ts`
+ * (see docs/CONVEX-MIGRATION.md §2). The exported signatures are frozen — the
+ * leading SQL `DbClient` handle is retained (named `_db`, intentionally unused)
+ * so handlers keep calling these unchanged while the rest of the runtime is
+ * still on the SQL path; the bodies read/write through the shared `getConvex()`
+ * handle instead. It is dropped wholesale when `server/db/*` is retired (§7).
+ * All row-shaping and ordering now live in the Convex functions.
+ *
+ * @see convex/loginAttempts.ts        — the Convex query/mutation functions
+ * @see server/auth/lockout.ts         — policy that consumes this
  */
 
-import { nanoid } from 'nanoid'
 import type { DbClient } from '../db/client'
+import { api, getConvex } from '../convex/client'
 
 export type LoginAttemptResult =
   | 'success'
@@ -39,30 +47,8 @@ interface LoginAttempt {
   result: LoginAttemptResult
 }
 
-interface LoginAttemptRow {
-  id: string
-  attempted_at: Date | string
-  email_norm: string | null
-  ip_address: string | null
-  user_agent: string | null
-  user_id: string | null
-  result: LoginAttemptResult
-}
-
-function rowToAttempt(row: LoginAttemptRow): LoginAttempt {
-  return {
-    id: row.id,
-    attemptedAt: new Date(row.attempted_at).toISOString(),
-    emailNorm: row.email_norm,
-    ipAddress: row.ip_address,
-    userAgent: row.user_agent,
-    userId: row.user_id,
-    result: row.result,
-  }
-}
-
 export async function recordLoginAttempt(
-  db: DbClient,
+  _db: DbClient,
   input: {
     emailNorm: string | null
     ipAddress: string | null
@@ -71,32 +57,21 @@ export async function recordLoginAttempt(
     result: LoginAttemptResult
   },
 ): Promise<void> {
-  await db`
-    insert into login_attempts (id, email_norm, ip_address, user_agent, user_id, result)
-    values (
-      ${nanoid()},
-      ${input.emailNorm},
-      ${input.ipAddress},
-      ${input.userAgent},
-      ${input.userId},
-      ${input.result}
-    )
-  `
+  await getConvex().mutation(api.loginAttempts.record, {
+    emailNorm: input.emailNorm,
+    ipAddress: input.ipAddress,
+    userAgent: input.userAgent,
+    userId: input.userId,
+    result: input.result,
+  })
 }
 
 export async function listLoginAttemptsForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   limit = 50,
 ): Promise<LoginAttempt[]> {
-  const { rows } = await db<LoginAttemptRow>`
-    select id, attempted_at, email_norm, ip_address, user_agent, user_id, result
-    from login_attempts
-    where user_id = ${userId}
-    order by attempted_at desc
-    limit ${limit}
-  `
-  return rows.map(rowToAttempt)
+  return getConvex().query(api.loginAttempts.listForUser, { userId, limit })
 }
 
 /**
@@ -115,33 +90,22 @@ export async function listLoginAttemptsForUser(
  * sessions.
  */
 export async function listLoginActivityForUser(
-  db: DbClient,
+  _db: DbClient,
   userId: string,
   emailNorm: string,
   limit = 50,
 ): Promise<LoginAttempt[]> {
-  const { rows } = await db<LoginAttemptRow>`
-    select id, attempted_at, email_norm, ip_address, user_agent, user_id, result
-    from login_attempts
-    where user_id = ${userId}
-       or (user_id is null and email_norm = ${emailNorm})
-    order by attempted_at desc
-    limit ${limit}
-  `
-  return rows.map(rowToAttempt)
+  return getConvex().query(api.loginAttempts.listActivityForUser, {
+    userId,
+    emailNorm,
+    limit,
+  })
 }
 
 export async function listLoginAttemptsForIp(
-  db: DbClient,
+  _db: DbClient,
   ipAddress: string,
   limit = 50,
 ): Promise<LoginAttempt[]> {
-  const { rows } = await db<LoginAttemptRow>`
-    select id, attempted_at, email_norm, ip_address, user_agent, user_id, result
-    from login_attempts
-    where ip_address = ${ipAddress}
-    order by attempted_at desc
-    limit ${limit}
-  `
-  return rows.map(rowToAttempt)
+  return getConvex().query(api.loginAttempts.listForIp, { ipAddress, limit })
 }

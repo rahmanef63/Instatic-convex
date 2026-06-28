@@ -1,0 +1,119 @@
+# convex/compose.selfhosted.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-hosted Convex BACKEND for the Instatic CMS data layer.
+#
+# This is the Convex side ONLY. The Instatic app itself (Bun + Vite custom
+# server) is deployed separately from the repo-root Dockerfile / compose.prod.yml
+# — see docs/DEPLOY-CONVEX.md for how the two halves wire together.
+#
+# Domain shape (mirrors the /sc-convex skill: api- / site- / dash- subdomains of
+# the project root domain instatic-rahmanef.com):
+#   api-instatic-rahmanef.com   → backend  :3210  (cloud / WebSocket + sync API)
+#   site-instatic-rahmanef.com  → backend  :3211  (httpAction / site origin)
+#   dash-instatic-rahmanef.com  → dashboard:6791  (admin dashboard UI)
+#
+# The Instatic Bun server connects to api-instatic-rahmanef.com as its data
+# backend (server-side via CONVEX_SELF_HOSTED_URL; the React admin client via
+# the VITE_-prefixed public URL). See docs/DEPLOY-CONVEX.md.
+#
+# ─── PERSISTENCE GUARANTEE ──────────────────────────────────────────────────
+# All Convex data lives in the named volume `instatic_convex_data`, mounted at
+# /convex/data inside the backend container. The volume is declared with an
+# explicit `name:` so Docker does NOT prefix it with the compose project name
+# and does NOT recreate it on redeploy. Redeploys recreate the *containers*
+# only; the named volume is never touched. This is the requirement: "get latest
+# updates WITHOUT deleting/replacing my Convex DB" — the data survives because
+# it is decoupled from the container lifecycle. Never `docker volume rm
+# instatic_convex_data` without a verified backup (see docs/deployment/
+# backup-restore.md).
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: instatic-convex
+
+networks:
+  # Dokploy's Traefik shares this external network. The backend/dashboard join
+  # it so Traefik can route the api-/site-/dash- subdomains to them. The network
+  # is created by Dokploy itself — do not define it here, only reference it.
+  dokploy-network:
+    external: true
+
+volumes:
+  # THE durable asset. Holds the entire Convex database + file storage.
+  # Explicit name => stable across redeploys, never project-prefixed, never
+  # auto-removed. This is the volume the persistence guarantee is built on.
+  instatic_convex_data:
+    name: instatic_convex_data
+
+services:
+  backend:
+    # SECURITY: never `:latest` in prod. Pin a release so a redeploy `docker
+    # pull` cannot silently ship a breaking backend. Bump deliberately.
+    # Current stable tags: https://github.com/get-convex/convex-backend/releases
+    image: ${CONVEX_SELF_HOSTED_IMAGE:-ghcr.io/get-convex/convex-backend:precompiled-2026-04-19-53c780f}
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+    volumes:
+      - instatic_convex_data:/convex/data
+    environment:
+      # INSTANCE_NAME + INSTANCE_SECRET together derive the admin key. Both MUST
+      # be preserved across redeploys — change either and every existing admin
+      # key / client token is invalidated. Set INSTANCE_SECRET once (32-byte
+      # hex) in the Dokploy compose env and never rotate it casually.
+      - INSTANCE_NAME=${CONVEX_INSTANCE_NAME:-instatic}
+      - INSTANCE_SECRET=${INSTANCE_SECRET:?INSTANCE_SECRET must be set (openssl rand -hex 32) — preserve across redeploys}
+      # Public origins. The backend embeds these in URLs it generates and uses
+      # them for CORS / cookie scoping. They are the api-/site- subdomains.
+      - CONVEX_CLOUD_ORIGIN=${CONVEX_CLOUD_ORIGIN:-https://api-instatic-rahmanef.com}
+      - CONVEX_SITE_ORIGIN=${CONVEX_SITE_ORIGIN:-https://site-instatic-rahmanef.com}
+      # Don't leak server stack traces to browser clients in production.
+      - REDACT_LOGS_TO_CLIENT=${REDACT_LOGS_TO_CLIENT:-true}
+      - DISABLE_METRICS_ENDPOINT=${DISABLE_METRICS_ENDPOINT:-false}
+    healthcheck:
+      # /version (3210) = API plane up; /api/health (3211) = httpAction plane up.
+      test:
+        - "CMD-SHELL"
+        - "curl -fsS http://localhost:3210/version && curl -fsS http://localhost:3211/api/health || exit 1"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # api- → 3210 (cloud / sync API plane)
+      - traefik.http.routers.instatic-convex-api.rule=Host(`api-instatic-rahmanef.com`)
+      - traefik.http.routers.instatic-convex-api.entrypoints=websecure
+      - traefik.http.routers.instatic-convex-api.tls=true
+      - traefik.http.routers.instatic-convex-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.instatic-convex-api.service=instatic-convex-api
+      - traefik.http.services.instatic-convex-api.loadbalancer.server.port=3210
+      # site- → 3211 (httpAction / site origin plane)
+      - traefik.http.routers.instatic-convex-site.rule=Host(`site-instatic-rahmanef.com`)
+      - traefik.http.routers.instatic-convex-site.entrypoints=websecure
+      - traefik.http.routers.instatic-convex-site.tls=true
+      - traefik.http.routers.instatic-convex-site.tls.certresolver=letsencrypt
+      - traefik.http.routers.instatic-convex-site.service=instatic-convex-site
+      - traefik.http.services.instatic-convex-site.loadbalancer.server.port=3211
+
+  dashboard:
+    image: ${CONVEX_DASHBOARD_IMAGE:-ghcr.io/get-convex/convex-dashboard:precompiled-2026-04-19-53c780f}
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+    environment:
+      # The dashboard talks to the backend's PUBLIC api origin.
+      - NEXT_PUBLIC_DEPLOYMENT_URL=${CONVEX_CLOUD_ORIGIN:-https://api-instatic-rahmanef.com}
+    depends_on:
+      backend:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # dash- → 6791 (admin dashboard UI)
+      - traefik.http.routers.instatic-convex-dash.rule=Host(`dash-instatic-rahmanef.com`)
+      - traefik.http.routers.instatic-convex-dash.entrypoints=websecure
+      - traefik.http.routers.instatic-convex-dash.tls=true
+      - traefik.http.routers.instatic-convex-dash.tls.certresolver=letsencrypt
+      - traefik.http.routers.instatic-convex-dash.service=instatic-convex-dash
+      - traefik.http.services.instatic-convex-dash.loadbalancer.server.port=6791
