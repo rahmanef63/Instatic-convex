@@ -45,7 +45,7 @@ COPY --chown=bun:bun tsconfig*.json ./
 COPY --chown=bun:bun server ./server
 COPY --chown=bun:bun src ./src
 
-RUN mkdir -p /app/uploads /app/data && chown -R bun:bun /app
+RUN mkdir -p /app/uploads && chown -R bun:bun /app
 
 USER bun
 EXPOSE 3001

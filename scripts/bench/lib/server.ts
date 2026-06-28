@@ -3,13 +3,12 @@
  * answers, return a handle that the bench can kill on completion.
  *
  * Picks a free port via Bun's net APIs so two parallel bench runs don't
- * collide. Uses a fresh SQLite DB seeded from `.tmp/dev.db` if present,
- * otherwise falls back to whatever the server defaults to (it will run
- * migrations on first boot).
+ * collide. The server boots against the self-hosted Convex backend named by
+ * CONVEX_SELF_HOSTED_URL in the environment; this helper does not provision one.
  */
 import { spawn } from 'bun'
 import { resolve } from 'node:path'
-import { mkdirSync, existsSync, copyFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 
 const REPO_ROOT = resolve(import.meta.dir, '../../..')
 
@@ -57,10 +56,6 @@ async function waitForHealth(baseUrl: string, timeoutMs = 30_000): Promise<numbe
 }
 
 interface StartOptions {
-  /** Existing SQLite file to clone for this run. Defaults to `.tmp/dev.db`. */
-  seedDbPath?: string
-  /** Where to write the per-run DB. Defaults to `.tmp/benchmarks/bench-<port>.db`. */
-  runDbPath?: string
   /** Stdout/stderr log file (defaults to `.tmp/benchmarks/server.log`). */
   logFile?: string
   /** Set `STATIC_DIR` so the server serves the built bundle. */
@@ -74,18 +69,14 @@ export async function startServer(opts: StartOptions = {}): Promise<ServerHandle
   const benchDir = resolve(REPO_ROOT, '.tmp/benchmarks')
   mkdirSync(benchDir, { recursive: true })
 
-  const seedDb = opts.seedDbPath ?? resolve(REPO_ROOT, '.tmp/dev.db')
-  const runDb = opts.runDbPath ?? resolve(benchDir, `bench-${port}.db`)
-  if (existsSync(seedDb)) {
-    copyFileSync(seedDb, runDb)
-  }
-  // Else: server will boot with an empty DB and run migrations.
-
+  // ponytail: the cms server now boots against a self-hosted Convex backend, not a
+  // local DB file — these benches require CONVEX_SELF_HOSTED_URL (and its admin key)
+  // in the environment, inherited via `...process.env` below. We do NOT provision
+  // a Convex backend here.
   const env: Record<string, string> = {
     ...process.env,
     NODE_ENV: 'production',
     PORT: String(port),
-    DATABASE_URL: `sqlite:${runDb}`,
   }
   if (opts.staticDir) env.STATIC_DIR = opts.staticDir
 

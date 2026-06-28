@@ -12,7 +12,7 @@
  *
  * Defaults map to "production mode on the dev DB":
  *   PORT=3001
- *   DATABASE_URL=sqlite:./.tmp/dev.db (server/config.ts default)
+ *   CONVEX_SELF_HOSTED_URL=<your self-hosted Convex backend> (server/convex/client.ts)
  *   STATIC_DIR=./dist
  *   UPLOADS_DIR=./uploads
  *

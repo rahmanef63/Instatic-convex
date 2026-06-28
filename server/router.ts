@@ -24,12 +24,6 @@ const VITE_DEV_URL = 'http://localhost:5173'
 interface ServerRuntime {
   staticDir?: string
   uploadsDir?: string
-  /**
-   * The raw `DATABASE_URL` the server booted with — forwarded down to
-   * CMS handlers that need to resolve the on-disk SQLite file (e.g. the
-   * storage dashboard widget).
-   */
-  databaseUrl?: string
 }
 
 /**
@@ -131,7 +125,6 @@ function tryServeCmsApi(req: Request, runtime: ServerRuntime, _url: URL, pathnam
   if (!pathname.startsWith('/admin/api/cms/')) return null
   return handleCmsRequest(req, {
     uploadsDir: runtime.uploadsDir,
-    databaseUrl: runtime.databaseUrl,
   })
 }
 

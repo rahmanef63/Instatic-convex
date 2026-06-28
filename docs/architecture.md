@@ -2,19 +2,19 @@
 
 System-level overview of Instatic — what runs, what depends on what, and where to look first.
 
-Instatic is a self-hosted CMS with a built-in visual editor. One Bun process serves the public website, the admin editor, the CMS API, published pages, and uploaded media, backed by either Postgres or SQLite. The visual editor's output is plain semantic HTML and hand-clean CSS — no framework runtime is injected into published pages.
+Instatic is a self-hosted CMS with a built-in visual editor. One Bun process serves the public website, the admin editor, the CMS API, published pages, and uploaded media, backed by a native, self-hosted Convex data layer. The visual editor's output is plain semantic HTML and hand-clean CSS — no framework runtime is injected into published pages.
 
 ---
 
 ## TL;DR
 
 - **One process, two off-main-thread workers**: `bun server/index.ts`. `Bun.serve` + a hand-written router (`server/router.ts`) routes every request. Plugin server code runs in per-plugin `Bun.Worker`s wrapping a QuickJS-WASM sandbox; image-variant generation (`sharp` + BlurHash) runs in a separate `Bun.Worker` pool. Everything else — HTTP, the admin API, the streaming agent endpoint, the publisher — runs on the main thread.
-- **One database, two engines**: Postgres (via `Bun.sql`) or SQLite (`bun:sqlite`), selected by `DATABASE_URL`. Repositories are dialect-naive; migrations are split per dialect with identical IDs.
+- **One data layer, native Convex**: schema in `convex/schema.ts`, query/mutation functions in `convex/*.ts`, reached from the Bun server through `server/convex/client.ts`. Repositories are thin pass-throughs with frozen signatures; app-generated nanoid PKs are indexed `v.string()` fields (`by_app_id`), never Convex's `_id`.
 - **One content model**: posts, pages, and visual components all live in `data_tables` + `data_rows`. No separate `pages` table. Page trees and VC trees both use the `NodeTree<TNode>` primitive.
 - **Two frontends, one bundle**: the admin app (`src/admin/`) shells the visual editor (`src/admin/pages/site/`). Both run in the same Vite-built SPA, mounted under `/admin/*`.
 - **Plugins run sandboxed**: server entrypoints and canvas module packs execute inside a QuickJS-WASM VM with no host access. They reach the CMS through the SDK at `src/core/plugin-sdk/`.
 - **One public-route surface, three publishing layers**: every visitor request for HTML — stand-alone pages and content rows alike — flows through `server/publish/publicRouter.ts:renderPublicResolution`. **Layer A** bakes fully-static pages to `uploads/published/current/<route>.html` at publish time via a two-slot symlink swap (atomic). **Layer B** is an in-memory LRU keyed by `(urlPath, queryString)` for dynamic routes — per-entry version tracking; bumps evict lazily on every publish, and version is captured at render start so mid-flight publishes discard results rather than caching stale HTML. **Layer C** auto-detects dynamic nodes (modules flagged `dynamic: true`, request-dependent bindings or loop sources, VC refs containing dynamic content) and emits `<instatic-hole>` placeholders that lazy-fetch their content via `/_instatic/hole/<nodeId>` using a ~668 B `IntersectionObserver` runtime. Authors don't toggle — `findDynamicNodeIds` in `src/core/publisher/dynamicDetection.ts` classifies automatically. The published `SiteDocument` is stored once per publish in `site_snapshots`; page versions reference it via `data_row_versions.site_snapshot_id`, and the reassembled `PublishedPageSnapshot` remains the canonical audit record. Output is plain semantic HTML + a single hashed CSS bundle per page, no framework runtime on the page.
-- **Multi-instance HA on Postgres**: both schedulers (plugin tick + scheduled publish) share a leader-election primitive in `server/db/advisoryLock.ts` (`withSchedulerLeaderLock`) that wraps `pg_try_advisory_lock`, so running multiple containers behind a load balancer doesn't double-fire scheduled work. Each scheduler passes its own distinct lock key; on SQLite (single-instance by definition) the module returns a no-op sentinel.
+- **Recurring work coordinates through Convex**: the schedulers (plugin scheduler tick, scheduled publish, conversation purge) run against Convex, the single backend. Double-firing across multiple Bun app instances is prevented by an atomic Convex lease mutation using optimistic concurrency (`convex/pluginSchedules.ts`) — two concurrent claimants serialise and the loser no-ops.
 - **Every untyped boundary uses TypeBox.** HTTP responses, request bodies, persisted JSON, plugin manifests, settings. `zod` is banned repo-wide — drivers talk directly to each provider's REST API and pass TypeBox schemas through as JSON Schema; `zod` has been removed from `package.json`. Gated by `ai-driver-isolation.test.ts`.
 
 ---
@@ -33,10 +33,10 @@ Instatic is a self-hosted CMS with a built-in visual editor. One Bun process ser
 │   │ /admin/api/  │ /admin/*     │ pages, files │            │
 │   │              │  → dist/     │  → uploads/  │            │
 │   │ → repos      │              │              │            │
-│   │ → db client  │              │              │            │
+│   │ → convex     │              │              │            │
 │   └──────────────┴──────────────┴──────────────┘            │
 │      ↓                                                      │
-│   server/db/client.ts      ← Postgres OR SQLite             │
+│   server/convex/client.ts  ← native Convex                  │
 │                                                             │
 │  ┌─── Bun.Worker pool ──────────────────────────────────┐   │
 │  │ image-variant worker (sharp + blurhash; CPU off the │   │
@@ -56,14 +56,15 @@ The same process serves visitors, admins, the API, the streaming agent endpoint,
 - **Plugin server entrypoints + canvas module packs** run inside a per-plugin `Bun.Worker` that hosts a QuickJS-WASM sandbox. The host process never imports plugin code. A crash in one plugin worker only affects that plugin; the host respawns it with a crash budget (`server/plugins/host/crashRecovery.ts`).
 - **Image-variant generation** (`sharp` resize + WebP encode + BlurHash) runs in a small pool of `Bun.Worker`s. A 4 MP JPEG is ~200–500 ms of CPU per upload; offloading it keeps visitor requests and the admin API responsive when an admin (or a future first-party feature) uploads images in bulk.
 
-There is no message queue, no managed service surface. Scaling out is a horizontal-Postgres play: both schedulers (plugin tick + scheduled-publish tick) share a leader-election primitive at `server/db/advisoryLock.ts` (`withSchedulerLeaderLock`) that wraps `pg_try_advisory_lock` so multiple instances behind a load balancer don't double-fire scheduled work. SQLite mode is single-instance by definition; the module falls through to a no-op sentinel there.
+There is no message queue, no managed service surface. The Bun app is stateless above the data layer, so multiple app instances can sit behind a load balancer. The recurring schedulers (plugin scheduler tick, scheduled-publish tick, conversation purge) coordinate through Convex, the single backend: double-firing is prevented by an atomic Convex lease mutation using optimistic concurrency (`convex/pluginSchedules.ts`) — two concurrent claimants serialise and the second no-ops.
 
 ---
 
 ## Folders, at a glance
 
 ```text
-server/         Bun server: router, handlers, repositories, plugin runtime, DB
+server/         Bun server: router, handlers, repositories, plugin runtime, convex client
+convex/         Convex data layer: schema.ts + per-module query/mutation functions
 src/admin/      Admin app shell (auth, navigation, workspaces, plugin host UI)
 src/admin/pages/site/   Visual editor (canvas, panels, toolbar, store)
 src/core/       Engine: page tree, publisher, plugin SDK + runtime, persistence
@@ -89,9 +90,9 @@ The repo is organized by responsibility, not by feature. Every file has one reas
 | HTTP & routing               | `server/router.ts`, `server/http.ts`  | Request dispatch, body parsing, error envelopes                      |
 | CMS endpoints                | `server/handlers/cms/*.ts`            | Per-resource handlers (pages, posts, components, media, plugins, …)  |
 | Auth & sessions              | `server/auth/*`                       | Session validation, capability checks, login flow                    |
-| Repositories                 | `server/repositories/*.ts`            | Database access; dialect-naive ANSI SQL only                         |
-| Database adapters            | `server/db/postgres.ts`, `sqlite.ts`  | Engine-specific `DbClient` implementation                            |
-| Migrations                   | `server/db/migrations-*.ts`           | Schema in both dialects, parity-gated                                |
+| Repositories                 | `server/repositories/*.ts`            | Thin pass-throughs that delegate to Convex; logic lives in `convex/*.ts` |
+| Convex client                | `server/convex/client.ts`             | Server-side `ConvexHttpClient` (admin auth) reaching the Convex backend |
+| Convex schema + functions    | `convex/schema.ts`, `convex/*.ts`     | Declarative schema (applied on deploy) + query/mutation handlers     |
 | Publisher                    | `src/core/publisher/*`                | Page tree → clean HTML/CSS (`publishPage`, deterministic, no host I/O). Includes `dynamicDetection.ts`, the single walker for the auto-detection rules that power Layer A shell-vs-complete bakes and Layer C holes. |
 | Public-route surface         | `server/publish/publicRouter.ts`      | Resolve URL → page snapshot or data row + template. Layer A disk fast-path + Layer B in-memory LRU live here. |
 | Static artefact IO           | `server/publish/staticArtefact.ts`    | Layer A: two-slot symlink swap, atomic per-file rename, slot-aware read/write/purge. |
@@ -132,8 +133,8 @@ server/router.ts         ← match path
     ├─→ /admin/api/cms/*    → server/handlers/cms/<resource>.ts
     │       │
     │       ├─→ server/auth         (session + capability checks)
-    │       ├─→ server/repositories (DB access)
-    │       └─→ server/db/client    (Postgres or SQLite)
+    │       ├─→ server/repositories (thin pass-throughs)
+    │       └─→ server/convex/client (native Convex)
     │
     ├─→ /admin/api/cms/plugins/<id>/runtime/* → plugin worker (QuickJS)
     │
@@ -167,7 +168,7 @@ A user-defined collection — a "post type" in WordPress terms. Has a `kind`:
 | `page`       | Stand-alone pages with URLs                   |
 | `component`  | Visual components (reusable subtrees)         |
 
-The four system tables (`posts`, `pages`, `components`, `layouts`) are seeded by the baseline migration and are locked from rename/delete.
+The four system tables (`posts`, `pages`, `components`, `layouts`) are seeded on first deploy and are locked from rename/delete.
 
 ### `data_rows`
 
@@ -177,11 +178,11 @@ The shape and cell types are defined by the `data_tables` schema. There is no se
 
 ### Storage conventions
 
-- JSON columns end in `_json`. The SQLite adapter auto-parses any `*_json` string on read and auto-stringifies any plain object on write. Gated by `db-json-column-naming.test.ts`.
-- Migrations are split per dialect with identical IDs. PG uses `jsonb`, `timestamptz`, `bigint`, `distinct on`; SQLite uses `text`, `text`, `integer`, window-function rewrites. Parity gated by `migration-parity.test.ts`.
-- Repositories use only ANSI-standard SQL. The five Postgres-isms — `now()` in DML, `::int`, `::jsonb`, `any($N::...)`, `distinct on` — are banned in any `DbClient`-importing file. Gated by `db-postgres-isms.test.ts`.
+- `*_json` columns stay opaque `v.string()` and are `JSON.parse`d explicitly in app code — there is no auto-parse. Any field that needs to be filtered, sorted, or searched is hoisted to its own top-level field with its own index.
+- App-generated nanoid PKs are stored as indexed `v.string()` fields looked up via `by_app_id`; Convex's `_id` is an internal handle, never exposed in return shapes, the REST API, or export bundles. Cross-table references stay `v.string()` app ids.
+- The schema lives in `convex/schema.ts` and is applied on deploy — there are no migration files and no DDL at boot.
 
-See [docs/reference/database-dialects.md](reference/database-dialects.md) for the full rules.
+See [docs/reference/database-dialects.md](reference/database-dialects.md) for the full data-layer rules.
 
 ---
 
@@ -347,7 +348,7 @@ When making a change, this table answers "where does it go?"
 | You're adding…                                         | Put it in                                                  |
 |--------------------------------------------------------|------------------------------------------------------------|
 | A new HTTP endpoint                                    | `server/handlers/cms/<resource>.ts` + route in `router.ts` |
-| A new database table                                   | Both `server/db/migrations-pg.ts` and `migrations-sqlite.ts` (same ID) |
+| A new database table                                   | A `defineTable(...)` entry in `convex/schema.ts` + its `convex/<module>.ts` functions |
 | A new repository function                              | `server/repositories/<resource>.ts`                        |
 | A new editor mutation                                  | `src/core/page-tree/mutations.ts` (tree-agnostic, takes `NodeTree`) |
 | A new editor store action                              | `src/admin/pages/site/store/siteSlice.ts` (one-liner calling `mutateActiveTree`) |
@@ -367,9 +368,6 @@ Architectural rules live as tests in `src/__tests__/architecture/*.test.ts` and 
 
 | Rule                                                                                                  | Gate                                                            |
 |-------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| Migrations parity between PG and SQLite                                                               | `migration-parity.test.ts`                                      |
-| JSON columns end in `_json`                                                                           | `db-json-column-naming.test.ts`                                 |
-| No Postgres-isms in repositories                                                                      | `db-postgres-isms.test.ts`                                      |
 | Page tree uses the flat `NodeTree<TNode>` shape                                                       | `src/__tests__/persistence/treeSchemaShape.test.ts`             |
 | Store mutations don't branch on VC mode                                                               | `no-vc-mode-branches-in-mutations.test.ts`                      |
 | No Tailwind utility classes (covers all palette names: `bg-zinc-*`, `text-blue-*`, etc.)              | `noTailwindUtilities.test.ts`, `no-tailwind-deps.test.ts`       |
@@ -393,8 +391,7 @@ See [docs/reference/architecture-tests.md](reference/architecture-tests.md) for 
 bun install
 
 # develop
-bun run dev              # SQLite at .tmp/dev.db, no Docker
-DATABASE_URL=postgres://… bun run dev   # Postgres mode
+bun run dev              # needs CONVEX_SELF_HOSTED_URL + an admin key in .env.local
 
 # verify
 bun run build            # tsc -b && vite build (typecheck + bundle)
@@ -419,7 +416,8 @@ bun run test:e2e          # run specs in tests/e2e/*.e2e.ts
 - [docs/editor.md](editor.md) — admin + canvas editor deep dive
 - [docs/features/plugin-system.md](features/plugin-system.md) — the plugin system
 - [docs/reference/page-tree.md](reference/page-tree.md) — the tree primitive
-- [docs/reference/database-dialects.md](reference/database-dialects.md) — PG vs. SQLite rules
+- [docs/reference/database-dialects.md](reference/database-dialects.md) — Convex data-layer rules
+- [docs/CONVEX-MIGRATION.md](CONVEX-MIGRATION.md) — full data-layer architecture; [docs/DEPLOY-CONVEX.md](DEPLOY-CONVEX.md) — self-hosted Convex deploy
 - Source-of-truth files:
   - `server/router.ts` — request dispatch
   - `server/publish/publicRouter.ts` — single entry for visitor HTML; orchestrates Layer A disk + Layer B cache
@@ -428,7 +426,8 @@ bun run test:e2e          # run specs in tests/e2e/*.e2e.ts
   - `server/publish/holeRuntime.ts` + `server/handlers/cms/hole.ts` — Layer C client runtime + fragment endpoint
   - `src/core/publisher/dynamicDetection.ts` — the single walker; rules for auto-classifying dynamic nodes
   - `server/handlers/cms/imageVariantWorkerHost.ts` — `Bun.Worker` pool for sharp + blurhash (keeps image processing off the main thread)
-  - `server/db/client.ts` — database abstraction
+  - `server/convex/client.ts` — server-side Convex handle (data abstraction)
+  - `convex/schema.ts` — Convex schema (tables, indexes); `convex/*.ts` — query/mutation functions
   - `src/core/page-tree/treeSchema.ts` — `NodeTree` primitive
   - `src/admin/pages/site/store/siteSlice.ts` — `mutateActiveTree`
   - `src/core/publisher/` — publishing pipeline

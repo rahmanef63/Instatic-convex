@@ -1,19 +1,19 @@
 # Server
 
-Deep dive on the server-side of Instatic — the Bun process, the router, the handlers, the auth model, the DB adapter, and how a request becomes a response.
+Deep dive on the server-side of Instatic — the Bun process, the router, the handlers, the auth model, the Convex data layer, and how a request becomes a response.
 
-The server is a single `Bun.serve` process that boots the DB, runs migrations, activates installed plugins, then accepts HTTP requests and dispatches them through an ordered route table. There are no other processes, no message queues, no workers. The runtime entrypoint is `server/index.ts`.
+The server is a single `Bun.serve` process that connects to the Convex data layer, syncs system roles, activates installed plugins, then accepts HTTP requests and dispatches them through an ordered route table. There are no other processes, no message queues, no workers. The runtime entrypoint is `server/index.ts`.
 
 ---
 
 ## TL;DR
 
-- **Entrypoint:** `server/index.ts` (boots DB → migrations → role sync → plugin activation → `Bun.serve`).
+- **Entrypoint:** `server/index.ts` (role sync → loop/media adapters → plugin activation → `Bun.serve`). The data layer is Convex, reached through `server/convex/client.ts:getConvex()`.
 - **Router:** `server/router.ts` — ordered route table, first-match wins. Each route is a `tryServeX(req, runtime, url, pathname)` function returning `Response | null`.
 - **CMS API:** every `/admin/api/cms/*` request goes through `server/handlers/cms/index.ts`, which runs a CSRF origin check and dispatches to per-resource handler groups.
-- **Auth:** session cookie (`SESSION_COOKIE_NAME`) → `findUserBySessionHash` → `requireCapability(req, db, 'site.read')`. Every state-changing handler starts with one of these guards.
-- **DB:** one `DbClient` interface (`server/db/client.ts`) — tagged-template callable returning `{ rows, rowCount }`. Two adapters: `postgres.ts` (via `Bun.sql`) and `sqlite.ts` (via `bun:sqlite`). Selected by `DATABASE_URL`.
-- **Repositories** (`server/repositories/`) hold all SQL. Handlers never write SQL directly.
+- **Auth:** session cookie (`SESSION_COOKIE_NAME`) → `findUserBySessionHash` → `requireCapability(req, 'site.read')`. Every state-changing handler starts with one of these guards.
+- **Data layer:** native, self-hosted Convex. `server/convex/client.ts` exposes one admin-authenticated `ConvexHttpClient` for the whole process (`getConvex()`); the schema lives in `convex/schema.ts` and the query/mutation functions in `convex/*.ts`.
+- **Repositories** (`server/repositories/`) are thin pass-throughs: each delegates to a Convex function via `getConvex().query/mutation(api.<domain>.<fn>, args)`. Handlers call repositories and never touch Convex directly.
 - **Plugins:** `server/plugins/runtime.ts` activates installed plugins at boot; per-plugin code runs in QuickJS-WASM sandboxes (`server/plugins/quickjs/vm.ts`, `modulePackVm.ts`).
 - **Published pages and content rows** are served by `tryServePublicRoute`, which delegates resolution + render to `server/publish/publicRouter.ts`. A warm Layer B cache entry is served before any DB work; on a miss the live render reads the published `SiteDocument` from `site_snapshots` (stored once per publish, referenced by `data_row_versions.site_snapshot_id`, memoised per publish version). Uploads + admin SPA assets are served from disk by `tryServeUpload` and `tryServeStaticAsset`.
 
@@ -24,24 +24,23 @@ The server is a single `Bun.serve` process that boots the DB, runs migrations, a
 ```text
 server/index.ts
     │
-    ├─→ readServerConfig()                   ← env vars: PORT, DATABASE_URL, UPLOADS_DIR, STATIC_DIR, PUBLIC_ORIGIN, TRUSTED_PROXY_CIDRS
+    ├─→ assert CONVEX_SELF_HOSTED_URL (or CONVEX_URL) is set   ← fail fast: no backend, no boot
     │
-    ├─→ createDbClient(DATABASE_URL)         ← server/db/index.ts
-    │     │
-    │     ├─ DATABASE_URL=sqlite:... | file:... | *.db  → createSqliteClient
-    │     └─ DATABASE_URL=postgres://...  | postgresql://...  → createPostgresClient
+    ├─→ readServerConfig()                   ← env vars: PORT, UPLOADS_DIR, STATIC_DIR, PUBLIC_ORIGIN, TRUSTED_PROXY_CIDRS
+    │     (the Convex backend URL + admin key are read by getConvex(), not here)
     │
-    ├─→ runMigrations(db, migrations)        ← server/db/runMigrations.ts
-    │     (selects migrations-pg.ts OR migrations-sqlite.ts based on dialect)
+    ├─→ configureTrustedProxyCidrs / configurePublicOrigins
     │
-    ├─→ syncSystemRoles(db)                  ← force-resets Owner capabilities every boot
+    ├─→ syncSystemRoles()                    ← force-resets Owner capabilities every boot (a Convex data upsert, no DDL)
+    ├─→ registerLoopDataAdapter()            ← wire the Convex-backed loop data source
     ├─→ mediaStorageRegistry.configureLocalDisk({ uploadsDir })   ← register local-disk media adapter
-    ├─→ activateInstalledServerPlugins(db, uploadsDir)            ← run plugin lifecycle: activate
+    ├─→ activateInstalledServerPlugins(uploadsDir)               ← run plugin lifecycle: activate
+    ├─→ startConversationPurgeTick()         ← nightly AI conversation purge
     │
     └─→ Bun.serve({ fetch: req => handleServerRequest(req, runtime) })
 ```
 
-Boot is sequential and fail-fast. If migrations fail, the process exits. If a plugin's `activate` throws, the host logs `[plugin:<id>]` and continues — one bad plugin doesn't bring the server down.
+Boot is sequential and fail-fast. If `CONVEX_SELF_HOSTED_URL` (or `CONVEX_URL`) is unset the process exits before serving — there is no data layer without it. There is no migration step: Convex applies `convex/schema.ts` on deploy, not at boot. If a plugin's `activate` throws, the host logs `[plugin:<id>]` and continues — one bad plugin doesn't bring the server down.
 
 ---
 
@@ -109,7 +108,7 @@ This prevents an unknown path under a known namespace from accidentally matching
 
 1. **CORS preflight** — `OPTIONS` returns 204 immediately with `corsHeaders(origin)`. ACAO is only set when the request's `Origin` is in `DEV_ORIGIN_ALLOWLIST` (production is same-origin behind Caddy, so no ACAO is needed).
 2. **Socket IP stamping** — `stampSocketIp(req, ...)` writes the actual socket peer address onto the request so downstream `clientIp(req)` can ignore spoofed forwarding headers on direct requests. `X-Forwarded-For` is used only when the socket peer matches `TRUSTED_PROXY_CIDRS`; the chain is walked from right to left and the nearest untrusted IP becomes the client IP.
-3. **Top-level error catch** — any error that escapes `handleServerRequest` is logged with `console.error('[server] Unhandled request error:', err)` and responded to with a generic `500 Internal server error`. The raw error message is **never** echoed to the client (it can leak SQL fragments, absolute paths, etc.).
+3. **Top-level error catch** — any error that escapes `handleServerRequest` is logged with `console.error('[server] Unhandled request error:', err)` and responded to with a generic `500 Internal server error`. The raw error message is **never** echoed to the client (it can leak internal query fragments, absolute paths, etc.).
 
 `idleTimeout: 0` is set explicitly: the agent endpoint streams NDJSON over Claude's thinking gaps, which can easily exceed Bun's 10s default.
 
@@ -125,28 +124,28 @@ This prevents an unknown path under a known namespace from accidentally matching
 
 ```ts
 const response =
-  (await handleSetupRoutes(req, db))
-  ?? (await handleAuthRoutes(req, db))
-  ?? (await handleMeRoutes(req, db, options))
-  ?? (await handleUserPreferencesRoutes(req, db))
-  ?? (await handleUsersRoutes(req, db))
-  ?? (await handleRolesRoutes(req, db))
-  ?? (await handleAuditRoutes(req, db))
-  ?? (await handleSiteRoutes(req, db))
-  ?? (await handlePagesRoutes(req, db))
-  ?? (await handleComponentsRoutes(req, db))
-  ?? (await handleRuntimeRoutes(req, db))
-  ?? (await handleMediaFolderRoutes(req, db))           // before /media/:id
-  ?? (await handleMediaStorageAdminRoutes(req, db, …))  // before /media/:id
-  ?? (await handleMediaRoutes(req, db, …))
-  ?? (await handlePluginsRoutes(req, db, …))
-  ?? (await handleDataRoutes(req, db))
-  ?? (await handleDashboardRoutes(req, db))
-  ?? (await handleFontsRoutes(req, db, …))
-  ?? (await handlePublishRoutes(req, db))
-  ?? (await handleExportRoute(req, db, options))
-  ?? (await handleImportPreviewRoute(req, db))          // before /import (longer path)
-  ?? (await handleImportRoute(req, db, options))
+  (await handleSetupRoutes(req))
+  ?? (await handleAuthRoutes(req))
+  ?? (await handleMeRoutes(req, options))
+  ?? (await handleUserPreferencesRoutes(req))
+  ?? (await handleUsersRoutes(req))
+  ?? (await handleRolesRoutes(req))
+  ?? (await handleAuditRoutes(req))
+  ?? (await handleSiteRoutes(req))
+  ?? (await handlePagesRoutes(req))
+  ?? (await handleComponentsRoutes(req))
+  ?? (await handleRuntimeRoutes(req))
+  ?? (await handleMediaFolderRoutes(req))           // before /media/:id
+  ?? (await handleMediaStorageAdminRoutes(req, …))  // before /media/:id
+  ?? (await handleMediaRoutes(req, …))
+  ?? (await handlePluginsRoutes(req, …))
+  ?? (await handleDataRoutes(req))
+  ?? (await handleDashboardRoutes(req))
+  ?? (await handleFontsRoutes(req, …))
+  ?? (await handlePublishRoutes(req))
+  ?? (await handleExportRoute(req, options))
+  ?? (await handleImportPreviewRoute(req))          // before /import (longer path)
+  ?? (await handleImportRoute(req, options))
 ```
 
 Each group module owns its URL matching and returns `Response | null`. The first non-null wins. Order matters — handler order comments in `index.ts` document the load-bearing precedence (e.g. media folder/storage routes must run before `/media/:id` because that pattern would otherwise eat them).
@@ -161,8 +160,8 @@ const PAGES_ROUTES: readonly Route<[]>[] = [
   { method: 'PUT', pattern: `${CMS_API_PREFIX}/pages`, handler: handleUpdatePages },
 ]
 
-export async function handlePagesRoutes(req: Request, db: DbClient): Promise<Response | null> {
-  return runRouteTable(req, db, PAGES_ROUTES)
+export async function handlePagesRoutes(req: Request): Promise<Response | null> {
+  return runRouteTable(req, PAGES_ROUTES)
 }
 ```
 
@@ -173,13 +172,12 @@ export async function handlePagesRoutes(req: Request, db: DbClient): Promise<Res
 
 Parameterised routes use a `RegExp` with **named capture groups** (`(?<id>[^/]+)`). The dispatcher decodes each captured value once via `decodeURIComponent`, so handlers receive already-decoded params and never call `decodeURIComponent` themselves.
 
-Handler groups that need per-request context beyond `(req, db)` (e.g. `CmsHandlerOptions`) pass it as a variadic `...extra` argument through both the route table and the individual handlers:
+Handler groups that need per-request context beyond `(req)` (e.g. `CmsHandlerOptions`) pass it as a variadic `...extra` argument through both the route table and the individual handlers:
 
 ```ts
-// Handler signature — three fixed args, then the typed extra
+// Handler signature — two fixed args (req, params), then the typed extra
 async function handleInstallFont(
   req: Request,
-  db: DbClient,
   _params: RouteParams,
   options: CmsHandlerOptions,
 ): Promise<Response> { … }
@@ -191,10 +189,9 @@ const FONTS_ROUTES: readonly Route<[CmsHandlerOptions]>[] = [
 
 export async function handleFontsRoutes(
   req: Request,
-  db: DbClient,
   options: CmsHandlerOptions,
 ): Promise<Response | null> {
-  return runRouteTable(req, db, FONTS_ROUTES, options)
+  return runRouteTable(req, FONTS_ROUTES, options)
 }
 ```
 
@@ -203,20 +200,19 @@ export async function handleFontsRoutes(
 Every per-route handler in `server/handlers/cms/` follows the same skeleton:
 
 ```ts
-async function handleListPages(req: Request, db: DbClient, _params: RouteParams): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.read')
+async function handleListPages(req: Request, _params: RouteParams): Promise<Response> {
+  const user = await requireCapability(req, 'site.read')
   if (user instanceof Response) return user      // 401 / 403 — return early
 
-  const rows = await listDataRows(db, 'pages')
+  const rows = await listDataRows('pages')
   return jsonResponse({ rows })
 }
 
 async function handleUpdatePages(
   req: Request,
-  db: DbClient,
   _params: RouteParams,
 ): Promise<Response> {
-  const user = await requireCapability(req, db, 'site.structure.edit')
+  const user = await requireCapability(req, 'site.structure.edit')
   if (user instanceof Response) return user
 
   const BodySchema = Type.Object({ pages: Type.Array(Type.Unknown()), /* … */ })
@@ -230,7 +226,7 @@ Conventions:
 
 - **Require capability first**, return early on auth failure.
 - **Validate body second** via TypeBox.
-- **Talk to repositories third.** Handlers don't write SQL.
+- **Talk to repositories third.** Handlers don't touch Convex directly.
 - **Return `jsonResponse({ … })` or an error envelope last.**
 - Path matching and 404/405 discrimination are handled entirely by `runRouteTable` — individual handlers never check `req.method` or `url.pathname`.
 
@@ -290,20 +286,20 @@ Cookie: instatic_admin_session=<token>
 hashSessionToken(token)
     │
     ▼
-findUserBySessionHash(db, hash)
+findUserBySessionHash(idHash)
     │
     ├─→ no row              → 401 Unauthorized
     ├─→ row but MFA needed  → 401 { error: 'mfa_required' }
     └─→ row OK              → AuthUser { id, email, capabilities, ... }
 ```
 
-`findUserBySessionHash` hydrates the `AuthUser` with a single `from sessions …
-join users …` SELECT (the column list lives once in `USER_JOINED_COLUMNS`,
-shared with the `users` repository). It then touches `sessions.last_seen_at`,
-but that write is **debounced** to at most once per session per ~30s via an
-in-memory tracker — the idle timeout is 30 days, so up-to-30s staleness is
-irrelevant, and the hot per-request write (WAL-serialized on SQLite, a hot-row
-lock on Postgres) is gone.
+`findUserBySessionHash` hydrates the `AuthUser` with a single Convex query
+(`api.sessions.findUserRowBySessionHash`) that looks the session up by
+`id_hash`, applies the live-session predicate, and hand-joins `users` + `roles`.
+It then touches `sessions.last_seen_at` (`api.sessions.touchLastSeen`), but that
+write is **debounced** to at most once per session per ~30s via an in-memory
+tracker — the idle timeout is 30 days, so up-to-30s staleness is irrelevant, and
+the hot per-request write is gone.
 
 **Resolve the session once per request.** A handler calls exactly one of
 `requireAuthenticatedUser` / `requireCapability` / `requireAnyCapability` to get
@@ -315,7 +311,7 @@ already-resolved user (see below). No handler should hydrate the session twice.
 ### The capability gate
 
 ```ts
-const user = await requireCapability(req, db, 'site.read')
+const user = await requireCapability(req, 'site.read')
 if (user instanceof Response) return user   // 401 or 403 already encoded
 // ... user is now AuthUser
 ```
@@ -324,12 +320,12 @@ if (user instanceof Response) return user   // 401 or 403 already encoded
 
 ### Step-up auth
 
-Sensitive actions (delete user, revoke another device, sign out all devices) gate on `requireStepUp(req, db, user, options?)`. It takes the **already-resolved `AuthUser`** — it does NOT re-authenticate — and returns `Response | null`: a 401 `{ error: 'step_up_required' }` when the window is stale, or `null` to proceed. The canonical pattern is therefore:
+Sensitive actions (delete user, revoke another device, sign out all devices) gate on `requireStepUp(req, user, options?)`. It takes the **already-resolved `AuthUser`** — it does NOT re-authenticate — and returns `Response | null`: a 401 `{ error: 'step_up_required' }` when the window is stale, or `null` to proceed. The canonical pattern is therefore:
 
 ```ts
-const user = await requireCapability(req, db, 'users.manage')
+const user = await requireCapability(req, 'users.manage')
 if (user instanceof Response) return user
-const stepUp = await requireStepUp(req, db, user)
+const stepUp = await requireStepUp(req, user)
 if (stepUp) return stepUp
 // ... re-authenticated, proceed with `user`
 ```
@@ -342,7 +338,7 @@ Step-up is required by default with a 15-minute window, can be configured per us
 
 ## Repositories
 
-All SQL lives in `server/repositories/`. Each file owns one resource:
+All data access lives in `server/repositories/`. Each file owns one resource and delegates to the matching `convex/*.ts` functions:
 
 | File                       | Owns                                              |
 |----------------------------|---------------------------------------------------|
@@ -367,91 +363,59 @@ All SQL lives in `server/repositories/`. Each file owns one resource:
 
 ### Repository rules
 
-1. **Repositories are dialect-naive.** They use ANSI-standard SQL only. The five Postgres-isms (`now()` in DML, `::int`, `::jsonb`, `any($N::...)`, `distinct on`) are banned in any file that imports `DbClient`. Gated by `db-postgres-isms.test.ts`.
+1. **Repositories are thin pass-throughs.** Each function keeps a frozen signature and delegates to a Convex function via `getConvex().query/mutation(api.<domain>.<fn>, args)`. Ownership checks, soft-delete filters, read-before-write upserts, and hand-assembled joins live in the `convex/*.ts` function, not the repository. See [docs/reference/database-dialects.md](reference/database-dialects.md).
 
-2. **JSON columns end in `_json`.** The SQLite adapter auto-parses `*_json` strings on read and auto-stringifies plain objects on write — so repository code does the same `${jsObject}` interpolation regardless of dialect. Gated by `db-json-column-naming.test.ts`. See [docs/reference/database-dialects.md](reference/database-dialects.md).
+2. **App ids use the `by_app_id` index.** The app-generated nanoid `id` is an indexed `v.string()`; Convex's `_id` stays an internal handle used only for `ctx.db.patch`/`delete` after a by-app-id lookup. Cross-table references are `v.string()` app ids, never `v.id(...)`.
 
-3. **Repositories return typed rows.** Use `Row` generics on `db<Row>` calls so handlers don't `as Foo` results.
+3. **`*_json` columns stay opaque strings.** A `*_json` field is `v.string()`, `JSON.parse`d explicitly at every read site — there is no auto-parse. Scalars you filter, sort, or search on are hoisted to their own indexed fields.
 
-4. **Repositories validate persisted JSON.** Anything read from a `*_json` column passes through a TypeBox schema (e.g. `validateSite` for the site shell). The DB is not a trusted source — a previous migration or external tool may have written garbage.
+4. **Validate persisted JSON.** Anything read from a `*_json` field passes through a TypeBox schema (e.g. `validateSite` for the site shell) before a repository returns it. Stored data is not a trusted source.
 
-5. **Transactions.** `db.transaction(async (tx) => { ... })` wraps a callback in a transaction. The callback receives a `DbClient` that scopes its queries to the transaction. Use it whenever a single request mutates multiple rows that must be consistent (e.g. batch upsert of pages).
+5. **Mutations are atomic.** A Convex mutation is a transaction over every document it touches — a multi-row write (token rotation, import replace-all, publish, reconcile) is one mutation, and a crash mid-handler rolls it all back. There is no `BEGIN/COMMIT`; the handler is the transaction.
 
 ---
 
-## The `DbClient` interface
+## The Convex client
 
-`server/db/client.ts`:
-
-```ts
-export type Dialect = 'postgres' | 'sqlite'
-
-export interface DbClient {
-  <Row = Record<string, unknown>>(
-    strings: TemplateStringsArray,
-    ...values: unknown[]
-  ): Promise<DbResult<Row>>
-  unsafe<Row>(sql: string, params?: unknown[]): Promise<DbResult<Row>>
-  transaction<T>(fn: (tx: DbClient) => Promise<T>): Promise<T>
-  readonly dialect: Dialect
-}
-
-export interface DbResult<Row> {
-  rows: Row[]
-  rowCount: number
-}
-```
-
-`DbClient` is callable as a tagged template:
+`server/convex/client.ts` owns the single server→Convex handle:
 
 ```ts
-const { rows } = await db<{ id: string }>`select id from users where email = ${email}`
+import { ConvexHttpClient } from 'convex/browser'
+import { api } from '../../convex/_generated/api'
+
+// One long-lived client per server process, authenticated with the self-hosted
+// ADMIN key. The Bun server is a fully trusted backend — every capability check
+// already ran in the HTTP handler before we get here — so it invokes Convex
+// functions with admin privileges. User identity is NOT carried on this
+// channel; it is passed as explicit function args.
+export function getConvex(): ConvexHttpClient { /* … */ }
+export { api }
 ```
 
-Interpolations are bound as parameters in both dialects (`$1, $2, …` on PG; `?` on SQLite). The SQLite adapter additionally converts plain objects and arrays to JSON strings at bind time, so:
+Repositories import `{ getConvex, api }` and delegate:
 
 ```ts
-await db`insert into site (id, settings_json) values (${id}, ${settings})`
-//                                                             ▲
-//                                            JS object becomes JSON in SQLite, JSONB in PG
+const rows = await getConvex().query(api.sessions.listForUser, { userId })
+const ok   = await getConvex().mutation(api.sessions.revokeByHashForUser, { sessionHash, userId })
 ```
 
-Same code, both engines.
+Three properties of the channel:
 
-### The two adapters
+- **Admin auth, identity as data.** The client authenticates with the self-hosted admin key (`CONVEX_SELF_HOSTED_ADMIN_KEY`), so it can invoke any function. The acting user is a validated **argument** (`userId`, `actorUserId`) — never `ctx.auth.getUserIdentity()`. The browser never holds a Convex token.
+- **App ids, not `_id`.** Every table stores its app-generated nanoid `id` as an indexed `v.string()`, looked up via the `by_app_id` index. Convex's `_id` is an opaque internal handle used only for `ctx.db.patch`/`delete` after a by-app-id lookup, and never leaves the handler.
+- **`*_json` stays a string.** JSON blobs are `v.string()`, parsed explicitly in app code. Scalars that get filtered, sorted, or searched are hoisted to real indexed fields.
 
-- **`server/db/postgres.ts`** wraps `Bun.sql` (native Bun Postgres client). `rowCount` is read from `result.count` (Bun's CommandComplete affected-row count) rather than `result.length`, which is always 0 for non-RETURNING writes.
-- **`server/db/sqlite.ts`** wraps `bun:sqlite`, with four custom behaviors:
-  1. `toBindable(value)` converts JS values (objects, dates, booleans, `Uint8Array`) to SQLite-bindable types.
-  2. On read, any column ending in `_json` whose value is a non-empty string is auto-`JSON.parse`d.
-  3. On boot, PRAGMAs are set: `journal_mode = WAL`, `foreign_keys = ON`, `synchronous = NORMAL`, `busy_timeout = 5000`.
-  4. Transaction serialization: concurrent `db.transaction()` calls are queued via a promise chain so `BEGIN` is never issued while another transaction is open on the single shared connection. This prevents "cannot start a transaction within a transaction" errors when transaction callbacks `await` async work.
+### Schema
 
-Both adapters return the same `DbResult<Row>` shape, so callers never branch on dialect.
+`convex/schema.ts` is the single declarative schema — every table, field, and index. Convex versions it and applies changes on **deploy**; there is no `_migrations` table, no migration files, and no DDL at boot. Adding or changing a table means editing `convex/schema.ts` and the matching `convex/*.ts` functions. See [docs/reference/database-dialects.md](reference/database-dialects.md) and [docs/CONVEX-MIGRATION.md](CONVEX-MIGRATION.md).
 
-### Migrations
+### Atomic mutations
 
-`server/db/migrations-pg.ts` and `server/db/migrations-sqlite.ts` hold the per-dialect migration list. Each migration is `{ id, label, statements: string[] }`. The two lists must have **identical IDs in the same order** — gated by `migration-parity.test.ts`. The PG version uses `jsonb`, `timestamptz`, `bigint`, `boolean`, `distinct on`; the SQLite version uses `text`, `text`, `integer`, `integer`, and window-function rewrites.
+A Convex mutation is atomic over every document it touches — the whole handler is the transaction, with no `BEGIN/COMMIT`. Multi-row writes that must be consistent (token rotation, the import replace/merge family, site + row publish, the `data_rows` reconcile) each collapse into one mutation; a crash mid-handler rolls the whole thing back. The risk to watch is the size/time limit of a single mutation — very large batch writes are chunked into a coordinator action that calls many small mutations. See [docs/CONVEX-MIGRATION.md §3](CONVEX-MIGRATION.md).
 
-`server/db/runMigrations.ts` runs the migrations idempotently at boot, tracking applied IDs in a `_migrations` table.
+### Scheduled work and leases
 
-See [docs/reference/database-dialects.md](reference/database-dialects.md) for the full rules.
-
-### HA leader election
-
-`server/db/advisoryLock.ts` owns the shared Postgres advisory-lock primitive used by every recurring tick loop:
-
-```ts
-await withSchedulerLeaderLock(db, LOCK_KEY, '[my-scheduler]', async () => {
-  // Only one instance runs this body per tick.
-})
-```
-
-`withSchedulerLeaderLock` issues `pg_try_advisory_lock(lockKey)` — returning the lock immediately or not at all. If this instance wins, it runs `fn` and releases the lock in a `finally` block. If another instance holds the lock, it returns `undefined` and the body is skipped.
-
-Each tick loop passes its own distinct `lockKey` so the plugin scheduler and the publish scheduler don't contend with each other. On SQLite (single-instance by definition) the module catches the "no such function" error and returns a no-op sentinel — the body always runs.
-
-The lock is **released between ticks**, so a crashed leader hands off naturally at the next interval. Tested by `server/db/__tests__/advisoryLock.test.ts` (unit, with a fake DbClient) and `server/__tests__/schedulers-advisory-lock.test.ts` (integration, against a real SQLite client).
+Recurring background work — the plugin schedule tick (`server/plugins/scheduler.ts`) and the AI conversation purge (`startConversationPurgeTick`) — runs as an in-process `setInterval` loop. Where two instances must not double-fire the same job, the lease is an **atomic Convex mutation** (`tryClaimSchedule`) using optimistic concurrency: because the mutation is atomic, two concurrent claimants serialise — the loser sees the live lease and no-ops. See [docs/CONVEX-MIGRATION.md §4.1](CONVEX-MIGRATION.md).
 
 ---
 
@@ -576,9 +540,9 @@ Three static handlers, in order:
 
 2. **Write the handler.** Require capability → validate body → call repository → return `jsonResponse`. One function per route. Add a `Route` entry to the group's `ROUTES` table; path matching and 404/405 discrimination are handled by `runRouteTable` — do not hand-roll `if (url.pathname !== ...)` or `return methodNotAllowed()` in the handler itself. Parameterised paths use a `RegExp` with named capture groups; the dispatcher decodes each captured value once.
 
-3. **If new SQL is needed,** add the function to the matching `server/repositories/<resource>.ts`. Do not write SQL inside the handler.
+3. **If new data access is needed,** add the function to the matching `server/repositories/<resource>.ts` (it delegates to a `convex/*.ts` function via `getConvex()`). The handler never calls Convex itself.
 
-4. **If new persisted shape is involved,** add the migration to both `migrations-pg.ts` and `migrations-sqlite.ts` with the same ID. JSON columns end in `_json`. Run `bun test src/__tests__/architecture/migration-parity.test.ts` and `db-json-column-naming.test.ts` to confirm.
+4. **If a new persisted shape is involved,** add or change the table in `convex/schema.ts` and the matching `convex/*.ts` functions; Convex applies it on deploy. JSON columns end in `_json` and are parsed explicitly.
 
 5. **If client-side calls the endpoint,** add a TypeBox response schema (in `src/core/persistence/responseSchemas.ts` for CMS endpoints, or alongside the caller) and fetch via the canonical `apiRequest(path, { schema })` from `@core/http`. Persistence-layer functions that inject their own `fetch` validate via `readEnvelope`.
 
@@ -587,10 +551,10 @@ Three static handlers, in order:
 ## Adding a new repository
 
 1. Create `server/repositories/<resource>.ts`. Export typed functions: `listX`, `getX(id)`, `createX(...)`, `updateX(id, patch)`, `deleteX(id)`.
-2. Use ANSI-standard SQL only. No Postgres-isms.
-3. JSON columns must end in `_json`. Interpolate plain JS objects via `${obj}` — both adapters handle the conversion.
-4. Use `db.transaction(async (tx) => ...)` for multi-row writes that must be atomic.
-5. Validate any JSON read from disk with a TypeBox schema before returning it.
+2. Keep each function a thin pass-through — delegate to a `convex/<resource>.ts` query/mutation via `getConvex().query/mutation(api.<resource>.<fn>, args)`. Put the logic (guards, joins, upserts) in the Convex function.
+3. JSON columns end in `_json` and stay `v.string()`; parse them explicitly. Multi-row writes that must be atomic are a single Convex mutation.
+4. Look rows up by app id through the `by_app_id` index; never expose Convex `_id`.
+5. Validate any persisted JSON with a TypeBox schema before returning it.
 
 ---
 
@@ -611,7 +575,8 @@ See [docs/reference/typebox-patterns.md](reference/typebox-patterns.md) for boun
 - [docs/architecture.md](architecture.md) — system overview
 - [docs/editor.md](editor.md) — what the admin / editor frontends do
 - [docs/features/plugin-system.md](features/plugin-system.md) — plugin runtime details
-- [docs/reference/database-dialects.md](reference/database-dialects.md) — PG vs SQLite rules
+- [docs/reference/database-dialects.md](reference/database-dialects.md) — the data layer (Convex)
+- [docs/CONVEX-MIGRATION.md](CONVEX-MIGRATION.md) — full data-layer architecture
 - [docs/reference/typebox-patterns.md](reference/typebox-patterns.md) — boundary validation
 - Source-of-truth files:
   - `server/index.ts` — entrypoint and boot
@@ -622,14 +587,11 @@ See [docs/reference/typebox-patterns.md](reference/typebox-patterns.md) for boun
   - `server/handlers/cms/index.ts` — CMS dispatcher
   - `server/handlers/cms/routeTable.ts` — shared `runRouteTable` dispatcher (404-vs-405 rule, named param decoding)
   - `server/auth/authz.ts` — `requireCapability` and friends
-  - `server/db/client.ts` — `DbClient` interface
-  - `server/db/index.ts` — adapter selection
-  - `server/db/postgres.ts`, `server/db/sqlite.ts` — adapters
-  - `server/db/migrations-pg.ts`, `server/db/migrations-sqlite.ts` — schemas
+  - `server/convex/client.ts` — `getConvex()` + `api` (admin-authenticated Convex handle)
+  - `convex/schema.ts` — every table, field, and index
+  - `convex/*.ts` — per-domain query/mutation functions
+  - `server/repositories/*.ts` — thin pass-throughs with frozen signatures
 - Gate tests:
-  - `src/__tests__/architecture/db-postgres-isms.test.ts`
-  - `src/__tests__/architecture/db-json-column-naming.test.ts`
-  - `src/__tests__/architecture/migration-parity.test.ts`
   - `src/__tests__/architecture/cms-handlers-capability-gated.test.ts` — every file under `server/handlers/cms/` calls an auth guard; allowlist entries carry explicit justifications
   - `src/__tests__/architecture/ai-handlers-capability-gated.test.ts`
   - `src/__tests__/architecture/ai-driver-isolation.test.ts`

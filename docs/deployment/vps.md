@@ -1,242 +1,112 @@
 # VPS Deployment
 
-This guide covers Docker Compose installs on a single VPS.
+This guide covers running Instatic on a single VPS with Docker.
 
-The VPS stack uses the same production image as managed platforms. Compose only supplies local persistence, an optional bundled Postgres service, and an optional Caddy TLS proxy.
+Instatic runs as two halves: the **Bun app** (the CMS, built from the repo-root `Dockerfile`) and a **self-hosted Convex backend** (the data layer). The app connects to Convex over `CONVEX_SELF_HOSTED_URL`; the entire database lives in the Convex backend's persistent `instatic_convex_data` volume. The app keeps its own `uploads` volume for media, fonts, plugin packages, and published artefacts.
+
+For the Convex backend itself — the compose template (`convex/compose.selfhosted.yml`), the `api-`/`site-`/`dash-` subdomains, the admin key, and the persistence guarantee — follow **[docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md)**. This page covers the app half and how it connects.
 
 ---
-
-## TL;DR
-
-| Mode | Source-build command | Containers | Persistent volumes |
-|---|---|---|---|
-| SQLite | `docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.build.yml up -d --build` | `app` | `data`, `uploads` |
-| Postgres | `docker compose -f compose.prod.yml -f compose.build.yml up -d --build` | `app`, `postgres` | `postgres_data`, `uploads` |
-| SQLite + TLS | `docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.tls.yml -f compose.build.yml up -d --build` | `app`, `caddy` | `data`, `uploads`, `caddy_data` |
-| Postgres + TLS | `docker compose -f compose.prod.yml -f compose.tls.yml -f compose.build.yml up -d --build` | `app`, `postgres`, `caddy` | `postgres_data`, `uploads`, `caddy_data` |
-
-SQLite is the default for most single-site installs. Postgres is for multiple simultaneous admin writers, horizontal app scale, or operators who already want Postgres.
-
-When using a published image, set `INSTATIC_IMAGE` and omit `compose.build.yml` plus `--build`.
-Before adding AI provider credentials, saving plugin secret settings, or enabling TOTP MFA in production, set `INSTATIC_SECRET_KEY` to the output of `bun run scripts/generate-secret-key.ts`.
-
-## Install From A Release Bundle
-
-1. Download `instatic-<version>-release-bundle.tar.gz` from the GitHub Release.
-2. Unpack it on the server.
-3. Choose SQLite or Postgres.
-
-SQLite:
-
-```sh
-INSTATIC_IMAGE=ghcr.io/corebunch/instatic:<version> docker compose -f compose.prod.yml -f compose.sqlite.yml up -d
-```
-
-Postgres:
-
-```sh
-cp .env.production.example .env
-# Set POSTGRES_PASSWORD and INSTATIC_SECRET_KEY in .env.
-INSTATIC_IMAGE=ghcr.io/corebunch/instatic:<version> docker compose -f compose.prod.yml up -d
-```
 
 ## Prerequisites
 
 Install Docker Engine and Docker Compose on the VPS. If using TLS, point a domain's DNS A/AAAA records at the server and open ports `80` and `443`.
 
-## Install Files
+Stand up (or point at) the Convex backend first — see [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md) steps A and B. Record its URL and admin key; the app needs them.
 
-Use a source checkout:
+## App environment
+
+The app reads these at runtime (server side):
+
+| Var | Value | Notes |
+|---|---|---|
+| `CONVEX_SELF_HOSTED_URL` | `https://api-<your-domain>` | server → Convex connection |
+| `CONVEX_SELF_HOSTED_ADMIN_KEY` | `<admin key>` | trusted-backend access; keep it secret, never bake it into the image |
+| `UPLOADS_DIR` | `/app/uploads` | persistent media / fonts / plugins / published artefacts |
+| `STATIC_DIR` | `/app/dist` | built admin SPA (Docker default) |
+| `INSTATIC_SECRET_KEY` | output of `bun run scripts/generate-secret-key.ts` | encrypts AI credentials, plugin secrets, TOTP seeds |
+| `PORT` | `3001` | Dockerfile default |
+| `PUBLIC_ORIGIN` | `https://<your-domain>` | CSRF origin when a proxy terminates TLS |
+| `TRUSTED_PROXY_CIDRS` | e.g. `172.16.0.0/12` | client-IP attribution only (audit logs, rate limits), not CSRF |
+
+The **browser** bundle needs `VITE_CONVEX_URL` (the public Convex URL) at `bun run build` time — Vite inlines it, so pass it as a Docker build arg when building from source. Set `INSTATIC_SECRET_KEY` before adding AI provider credentials, saving plugin secret settings, or enabling TOTP MFA in production.
+
+## Run the app
+
+Using the published image:
 
 ```sh
-git clone https://github.com/CoreBunch/Instatic.git
-cd instatic
+docker volume create uploads
+
+docker run -d \
+  --name instatic \
+  -p 3001:3001 \
+  -e CONVEX_SELF_HOSTED_URL="https://api-<your-domain>" \
+  -e CONVEX_SELF_HOSTED_ADMIN_KEY="<admin key>" \
+  -e UPLOADS_DIR=/app/uploads \
+  -e STATIC_DIR=/app/dist \
+  -e INSTATIC_SECRET_KEY="<generate-secret-key output>" \
+  -v uploads:/app/uploads \
+  --restart unless-stopped \
+  ghcr.io/corebunch/instatic:<version>
 ```
 
-For plain SQLite without TLS, source builds use `compose.prod.yml`, `compose.sqlite.yml`, and `compose.build.yml`. Image-pull installs use only `compose.prod.yml` and `compose.sqlite.yml`, but they still need the Compose files from a checkout or release bundle.
+Build from source with `--build-arg VITE_CONVEX_URL=https://api-<your-domain>` when the admin bundle must point at your own backend rather than the image default.
 
-## SQLite Install
-
-For reversible server secrets such as AI credentials, plugin secret settings, and TOTP MFA seeds, copy the env template and set `INSTATIC_SECRET_KEY` first:
-
-```sh
-cp .env.production.example .env
-bun run scripts/generate-secret-key.ts
-```
-
-Paste the printed key into `.env` as `INSTATIC_SECRET_KEY`.
-
-Run:
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.build.yml up -d --build
-```
-
-This starts one `app` container. `compose.sqlite.yml` disables the Postgres service and sets:
-
-```txt
-DATABASE_URL=sqlite:/app/data/cms.db
-```
+Open `http://server-ip:3001/admin`. The first visit creates the site and admin account.
 
 Persistent data:
 
 | Volume | Mount path | Contents |
 |---|---|---|
-| `data` | `/app/data` | SQLite database |
-| `uploads` | `/app/uploads` | Media, fonts, plugins, published artefacts |
-
-Open:
-
-```txt
-http://server-ip:3001/admin
-```
-
-The first visit creates the site and admin account.
-
-## Postgres Install
-
-Copy the env template:
-
-```sh
-cp .env.production.example .env
-```
-
-Edit `.env` and set a real password:
-
-```txt
-POSTGRES_PASSWORD=replace-with-a-long-random-password
-INSTATIC_SECRET_KEY=replace-with-output-of-generate-secret-key
-```
-
-Generate one with:
-
-```sh
-openssl rand -hex 24
-```
-
-Start the stack:
-
-```sh
-docker compose -f compose.prod.yml -f compose.build.yml up -d --build
-```
-
-This starts `app` and `postgres`. `compose.prod.yml` sets the app's `DATABASE_URL` to the bundled Postgres service:
-
-```txt
-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-```
-
-Persistent data:
-
-| Volume | Mount path | Contents |
-|---|---|---|
-| `postgres_data` | `/var/lib/postgresql/data` | Postgres data directory |
-| `uploads` | `/app/uploads` | Media, fonts, plugins, published artefacts |
+| `uploads` | `/app/uploads` | media, fonts, plugins, published artefacts |
+| `instatic_convex_data` | `/convex/data` (Convex backend) | the entire Convex database + file storage |
 
 ## HTTPS
 
-Add `compose.tls.yml` when the VPS has a public domain. Set these in `.env`:
-
-```txt
-DOMAIN=cms.example.com
-LETSENCRYPT_EMAIL=ops@example.com
-PUBLIC_ORIGIN=https://cms.example.com
-```
-
-Caddy terminates TLS and forwards plain HTTP to the container, so the container's own request URL is `http://app:3001`. `PUBLIC_ORIGIN` is how Instatic knows the real public origin for its CSRF check — set it to `https://` plus your `DOMAIN`. (Leave `PUBLIC_ORIGIN` unset only for plain-HTTP installs with no proxy in front.)
-
-Run SQLite + TLS:
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.tls.yml -f compose.build.yml up -d --build
-```
-
-Run Postgres + TLS:
-
-```sh
-docker compose -f compose.prod.yml -f compose.tls.yml -f compose.build.yml up -d --build
-```
-
-See [tls-caddy.md](tls-caddy.md) for the Caddy details.
+Put an HTTPS-capable reverse proxy in front (Caddy is bundled — see [tls-caddy.md](tls-caddy.md)) and set `PUBLIC_ORIGIN=https://your-domain` so the CSRF origin check matches the public URL even though the proxy hands the app plain HTTP.
 
 ## Operations
 
-Check status:
-
 ```sh
-docker compose -f compose.prod.yml ps
+# health
 curl http://localhost:3001/health
+
+# logs
+docker logs -f instatic
+
+# update the app — the instatic_convex_data volume is never touched
+docker pull ghcr.io/corebunch/instatic:<version>
+docker rm -f instatic && docker run -d ...   # re-run with the same env + volumes
 ```
 
-View logs:
+## Without Docker (direct Bun install)
 
-```sh
-docker compose -f compose.prod.yml logs -f app
-docker compose -f compose.prod.yml logs -f postgres   # Postgres installs only
-```
-
-Update a source-build install:
-
-```sh
-git pull
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.build.yml up -d --build
-```
-
-For Postgres source-build installs, omit `compose.sqlite.yml`:
-
-```sh
-git pull
-docker compose -f compose.prod.yml -f compose.build.yml up -d --build
-```
-
-Update an image-pull install:
-
-```sh
-docker compose -f compose.prod.yml pull app
-docker compose -f compose.prod.yml up -d
-```
-
-SQLite image-pull installs include the SQLite override:
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml pull app
-docker compose -f compose.prod.yml -f compose.sqlite.yml up -d
-```
-
-## Without Docker (Direct Bun Install)
-
-The CMS runs directly on the host without Docker. From a source checkout:
+From a source checkout:
 
 ```sh
 bun install
-bun run build
-DATABASE_URL=sqlite:./data/cms.db \
+VITE_CONVEX_URL=https://api-<your-domain> bun run build
+CONVEX_SELF_HOSTED_URL=https://api-<your-domain> \
+  CONVEX_SELF_HOSTED_ADMIN_KEY=<admin key> \
   STATIC_DIR=./dist \
   UPLOADS_DIR=./uploads \
-  INSTATIC_SECRET_KEY=replace-with-output-of-generate-secret-key \
+  INSTATIC_SECRET_KEY=<generate-secret-key output> \
   TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 \
   PORT=3001 \
   bun run server/index.ts
 ```
 
-Replace `DATABASE_URL` with a Postgres connection string for Postgres mode. `STATIC_DIR` must point at the built admin SPA (`dist/` after `bun run build`).
+`VITE_CONVEX_URL` must be set at build time (Vite inlines it into the admin bundle); `STATIC_DIR` must point at the built SPA (`dist/` after `bun run build`). Wrap the server command in a process supervisor (systemd, pm2, supervisord) for auto-restart, and front it with a TLS proxy, setting `PUBLIC_ORIGIN=https://your-domain` so the CSRF origin check matches the public URL.
 
-Wrap the command in a process supervisor (systemd, pm2, supervisord) for auto-restart on crash and on server boot. Put an HTTPS-capable reverse proxy (Caddy, Nginx, Cloudflare Tunnel) in front for TLS, and set `PUBLIC_ORIGIN=https://your-domain` so the CSRF origin check matches the public URL even though the proxy hands the Bun process plain HTTP. `TRUSTED_PROXY_CIDRS` is independent of CSRF: set it to the proxy's source CIDR only if you want real client IPs in audit logs and rate-limit keys, and leave it empty if the app is directly exposed.
+## Data safety
 
-## Data Safety
-
-`docker compose down` stops containers and keeps named volumes.
-
-`docker compose down -v` deletes named volumes. For Instatic that means deleting the CMS database and uploaded media. Use it only when intentionally wiping the install.
-
-Backups are covered in [backup-restore.md](backup-restore.md).
+The durable assets are the Convex `instatic_convex_data` volume (the database) and the app `uploads` volume (media). `docker rm` of a container keeps named volumes; removing a volume — or a compose service "with volumes" — destroys data. Back both up: [backup-restore.md](backup-restore.md).
 
 ## Related
 
+- [docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md) — self-hosted Convex backend (the data layer)
 - [deployment/README.md](README.md) — deployment overview
 - [docker-image.md](docker-image.md) — generic Docker image contract
 - [tls-caddy.md](tls-caddy.md) — HTTPS overlay
 - [backup-restore.md](backup-restore.md) — backup and restore procedures
-- `compose.prod.yml` — production Compose base
-- `compose.sqlite.yml` — SQLite override
-- `compose.tls.yml` — Caddy TLS override

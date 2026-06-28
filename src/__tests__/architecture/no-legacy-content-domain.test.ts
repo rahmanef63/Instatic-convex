@@ -6,12 +6,9 @@
  * imports, and SQL table references must be gone from production source.
  *
  * This gate scans production source files and fails if any legacy reference
- * is found. Tests and migration files are excluded because:
+ * is found. Test-only code is excluded:
  *
  *   - `src/__tests__/` — test-only code, not shipped
- *   - `server/db/migrations-*.ts` — migration history; the old table names
- *     must NOT appear here either (they were never created — the refactor
- *     happened before any external release), so they are still scanned.
  *
  * Legacy SQL table names (must not appear in any production source):
  *   - content_collections

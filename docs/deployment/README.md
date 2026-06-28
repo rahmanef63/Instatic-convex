@@ -1,40 +1,42 @@
 # Deployment
 
-This index maps supported deployment targets to the files, variables, and persistence rules they need.
+This index maps the supported deployment shape to the files, variables, and persistence rules it needs.
 
-Instatic is one Bun server packaged by the root `Dockerfile`. The server reads runtime configuration from `server/config.ts`: `PORT`, `DATABASE_URL`, `UPLOADS_DIR`, `STATIC_DIR`, `PUBLIC_ORIGIN`, and `TRUSTED_PROXY_CIDRS`. Reversible server secrets, including AI provider credentials, plugin secret settings, and MFA TOTP seeds, are encrypted with `INSTATIC_SECRET_KEY` when configured. Database migrations run automatically on boot in `server/index.ts`.
+Instatic runs as two halves: the **Bun app** (packaged by the repo-root `Dockerfile`) and a **self-hosted Convex backend** (the data layer). The app reads runtime configuration from `server/config.ts`: `PORT`, `UPLOADS_DIR`, `STATIC_DIR`, `PUBLIC_ORIGIN`, `TRUSTED_PROXY_CIDRS`, and the Convex connection (`CONVEX_SELF_HOSTED_URL` + `CONVEX_SELF_HOSTED_ADMIN_KEY`). Reversible server secrets — AI provider credentials, plugin secret settings, MFA TOTP seeds — are encrypted with `INSTATIC_SECRET_KEY`. There is no migration step at boot; Convex applies `convex/schema.ts` on deploy.
 
 ---
 
 ## TL;DR
 
-| Target | Use when | Database | Persistent storage | Docs |
-|---|---|---|---|---|
-| Railway SQLite template | Fastest managed install for a single site | SQLite file | One Railway app volume mounted at `/app/storage` | [railway.md](railway.md) |
-| Railway Postgres template | Managed install for teams or horizontal scale later | Railway Postgres | App volume for uploads, Postgres service volume for DB | [railway.md](railway.md) |
-| Render SQLite template | Managed Docker install outside Railway | SQLite file | One Render disk mounted at `/app/storage` | [render.md](render.md) |
-| Render Postgres template | Managed Postgres install outside Railway | Render Postgres | Render disk for uploads, Render Postgres storage for DB | [render.md](render.md) |
-| VPS Docker Compose | Self-hosted server, full control | SQLite or bundled Postgres | Docker named volumes | [vps.md](vps.md) |
-| Generic Docker host | Any platform that runs the Dockerfile/image | SQLite or external Postgres | A mounted directory/volume for DB/uploads | [docker-image.md](docker-image.md) |
-| VPS HTTPS | Public domain on a VPS | Unchanged | Caddy cert volume plus app volumes | [tls-caddy.md](tls-caddy.md) |
+The canonical deploy puts both halves on one host behind Dokploy + Traefik: stand up the Convex backend, push the schema, then deploy the app. Full reference: **[docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md)**.
 
-Back up both the database and uploaded media. See [backup-restore.md](backup-restore.md).
+| Target | Use when | Data layer | Persistent storage | Docs |
+|---|---|---|---|---|
+| Dokploy (canonical) | Self-hosted, both halves on one host | self-hosted Convex backend | `instatic_convex_data` (database) + app `uploads` volume | [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md) |
+| VPS Docker | Self-hosted server, full control | self-hosted Convex backend | `instatic_convex_data` + `uploads` named volumes | [vps.md](vps.md) |
+| Generic Docker host | Any platform that runs the Dockerfile/image | self-hosted Convex backend | volume for `instatic_convex_data` + a mount for `uploads` | [docker-image.md](docker-image.md) |
+| VPS HTTPS | Public domain on a VPS | unchanged | Caddy cert volume plus app/Convex volumes | [tls-caddy.md](tls-caddy.md) |
+
+Back up both the Convex data volume and the uploads volume. See [backup-restore.md](backup-restore.md).
 
 ## Runtime Contract
 
-Every deployment target configures the same process:
+The app process configures the same way everywhere:
 
 ```txt
-PORT          HTTP port the Bun server listens on
-DATABASE_URL  sqlite:/path/to/cms.db, file:/path/to/cms.db, postgres://..., or postgresql://...
-UPLOADS_DIR   directory for media, plugin packs, fonts, and published disk artefacts
-STATIC_DIR    built admin SPA directory; /app/dist in the Docker image
-INSTATIC_SECRET_KEY  base64 32-byte key for encrypted server secrets
-PUBLIC_ORIGIN        comma-separated public origin(s) the CSRF check trusts; auto-detected from RENDER_EXTERNAL_URL / RAILWAY_PUBLIC_DOMAIN on those platforms
-TRUSTED_PROXY_CIDRS  optional; trusts proxy socket peers for forwarded client-IP attribution only (audit logs, rate-limit keys) — NOT used for CSRF
+PORT                          HTTP port the Bun server listens on
+CONVEX_SELF_HOSTED_URL        https://api-<your-domain> — server → Convex connection (or CONVEX_URL)
+CONVEX_SELF_HOSTED_ADMIN_KEY  trusted-backend admin key for the Convex backend
+UPLOADS_DIR                   directory for media, plugin packs, fonts, and published disk artefacts
+STATIC_DIR                    built admin SPA directory; /app/dist in the Docker image
+INSTATIC_SECRET_KEY           base64 32-byte key for encrypted server secrets
+PUBLIC_ORIGIN                 comma-separated public origin(s) the CSRF check trusts
+TRUSTED_PROXY_CIDRS           optional; trusts proxy peers for forwarded client-IP attribution only — NOT CSRF
 ```
 
-Generate `INSTATIC_SECRET_KEY` with `bun run scripts/generate-secret-key.ts` before adding Anthropic, OpenAI, or OpenRouter credentials or enabling TOTP MFA in production. Without it, the admin can load but saving reversible secrets fails because there is no stable encryption key.
+The **browser** admin bundle additionally needs `VITE_CONVEX_URL` (the public Convex URL) at `bun run build` time — Vite inlines it, so it must be a Docker build arg, not just a runtime env.
+
+Generate `INSTATIC_SECRET_KEY` with `bun run scripts/generate-secret-key.ts` before adding Anthropic, OpenAI, or OpenRouter credentials or enabling TOTP MFA in production. Without it, the admin loads but saving reversible secrets fails because there is no stable encryption key.
 
 The Docker image sets:
 
@@ -44,72 +46,46 @@ STATIC_DIR=/app/dist
 UPLOADS_DIR=/app/uploads
 ```
 
-Managed platforms often override `PORT`. That is fine; the server uses `process.env.PORT`. When a managed platform terminates HTTPS before forwarding HTTP to the container, the CSRF origin check derives the site's public origin from `PUBLIC_ORIGIN` — auto-detected from `RENDER_EXTERNAL_URL` / `RAILWAY_PUBLIC_DOMAIN` on Render and Railway, so one-click deploys need no manual value. Set `PUBLIC_ORIGIN` explicitly (a comma-separated list) when adding a custom domain. `TRUSTED_PROXY_CIDRS` is independent of CSRF and only attributes the real client IP for audit logs and rate-limit keys.
+When a proxy terminates HTTPS before forwarding HTTP to the container, the CSRF origin check derives the site's public origin from `PUBLIC_ORIGIN`. Set it explicitly when adding a custom domain. `TRUSTED_PROXY_CIDRS` is independent of CSRF and only attributes the real client IP for audit logs and rate-limit keys.
 
 ## Image Availability
 
-Release bundles plus the published GHCR image are the default portable install path:
+The published GHCR image is the default portable install path for the app:
 
 ```sh
-INSTATIC_IMAGE=ghcr.io/corebunch/instatic:latest docker compose -f compose.prod.yml -f compose.sqlite.yml up -d
-```
-
-Pin a semver tag for predictable upgrades:
-
-```sh
-INSTATIC_IMAGE=ghcr.io/corebunch/instatic:0.0.6 docker compose -f compose.prod.yml -f compose.sqlite.yml up -d
-```
-
-Source builds remain supported for contributors and release-candidate testing:
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.build.yml up -d --build
+docker pull ghcr.io/corebunch/instatic:latest
+docker pull ghcr.io/corebunch/instatic:0.0.6   # pin a semver tag for predictable upgrades
 ```
 
 The maintainer release target is `ghcr.io/corebunch/instatic`, documented in [release-workflow.md](release-workflow.md).
 
-## Database Choice
+## Data layer (self-hosted Convex)
 
-The database engine is selected only by `DATABASE_URL`:
-
-| URL shape | Engine |
-|---|---|
-| `sqlite:/path/to/cms.db` | SQLite |
-| `file:/path/to/cms.db` | SQLite |
-| `/path/to/cms.db` | SQLite |
-| `postgres://...` | Postgres |
-| `postgresql://...` | Postgres |
-
-SQLite is the default for single-site installs. Postgres is for multiple simultaneous admin writers, more than one app container, or operators who already want managed Postgres.
+The data layer is a self-hosted Convex backend, not a database the app provisions itself. There is no `DATABASE_URL`. The app connects over `CONVEX_SELF_HOSTED_URL` + an admin key; the whole database (content rows, users, sessions, media records, audit events) plus Convex file storage lives in the `instatic_convex_data` named volume on the backend. Standing up the backend, pushing `convex/schema.ts`, and the persistence guarantee are all in [docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md).
 
 ## Persistence Rules
 
-`UPLOADS_DIR` is required for durable media regardless of the database engine. It stores:
+Two durable assets:
 
-- uploaded media originals and variants
-- uploaded fonts
-- plugin packages and module packs
-- published static artefacts under `published/current`
-
-SQLite installs also need the SQLite database file on persistent storage. On platforms with only one app volume, put both the SQLite file and uploads under the same mounted root.
+- **`instatic_convex_data`** — the Convex backend volume. The single durable copy of the database + Convex file storage. A redeploy never removes it; only `docker volume rm` (or a compose service deleted "with volumes") destroys it.
+- **`UPLOADS_DIR`** — required for durable media regardless of the data layer. It stores uploaded media originals and variants, uploaded fonts, plugin packages and module packs, and published static artefacts under `published/current`.
 
 ## Docs Inventory
 
 | File | Role |
 |---|---|
-| [railway.md](railway.md) | Railway templates for SQLite and Postgres |
-| [render.md](render.md) | Render Blueprint templates for SQLite and Postgres |
-| [vps.md](vps.md) | Docker Compose on a VPS, both SQLite and Postgres |
+| [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md) | Canonical self-hosted Convex + app deploy (Dokploy) |
+| [vps.md](vps.md) | Docker install on a VPS: the app + the self-hosted Convex backend |
 | [docker-image.md](docker-image.md) | Generic Docker image contract and `docker run` examples |
-| [tls-caddy.md](tls-caddy.md) | Caddy TLS overlay for VPS Compose installs |
-| [backup-restore.md](backup-restore.md) | Database and uploads backup/restore |
+| [tls-caddy.md](tls-caddy.md) | Caddy TLS overlay for VPS installs |
+| [backup-restore.md](backup-restore.md) | Backing up the Convex data volume and uploads |
 | [release-workflow.md](release-workflow.md) | Maintainer image publishing workflow |
+| [railway.md](railway.md) / [render.md](render.md) | Note: managed-Postgres targets, superseded by the self-hosted Convex data layer |
 
 ## Related
 
 - `server/config.ts` — runtime env parsing
-- `server/db/index.ts` — database URL detection
-- `server/index.ts` — migrations, media storage, and server boot
+- `server/convex/client.ts` — Convex connection (reads `CONVEX_SELF_HOSTED_URL` + admin key)
+- `server/index.ts` — server boot (asserts the Convex backend, media storage, plugins)
 - `Dockerfile` — production image contract
-- `compose.prod.yml`, `compose.sqlite.yml`, `compose.tls.yml`, `compose.build.yml` — VPS Compose files
-- `docs/deployment/render/sqlite/render.yaml`, `docs/deployment/render/postgres/render.yaml` — Render Blueprint templates
+- `convex/compose.selfhosted.yml` — self-hosted Convex backend compose reference

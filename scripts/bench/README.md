@@ -1,6 +1,6 @@
 # Benchmark suite
 
-A reusable performance suite for the instatic. Spans both ends of the stack: bundle composition, publisher render speed, the full publish pipeline + public serving, the editor store under class/tree stress, HTTP latency + throughput, SQLite performance, plugin sandbox cost, repo footprint, and code-health snapshot.
+A reusable performance suite for the instatic. Spans both ends of the stack: bundle composition, publisher render speed, the editor store under class/tree stress, HTTP latency + throughput, plugin sandbox cost, repo footprint, and code-health snapshot.
 
 Everything writes to `.tmp/benchmarks/` (gitignored). One run produces a single `REPORT.md` plus per-bench logs.
 
@@ -19,10 +19,8 @@ The orchestrator writes `.tmp/benchmarks/REPORT.md` and prints a one-line summar
 ```bash
 bun run bench:bundle        # just dist/ composition
 bun run bench:publisher     # just the page-tree → HTML pipeline
-bun run bench:publish       # full publish pipeline + public serving (DB-backed)
 bun run bench:editor-store  # editor store mutations + class system stress
 bun run bench:http          # HTTP latency + throughput (auto starts a server)
-bun run bench:db            # SQLite performance
 bun run bench:plugin        # QuickJS sandbox boot / hostCall / dispose
 bun run bench:footprint     # repo / node_modules / SLOC stats
 bun run bench:health        # fallow + jscpd + madge snapshot
@@ -55,7 +53,7 @@ bun run bench --skip=health,plugin
 ## Prerequisites
 
 - **Bundle bench** requires `dist/` to exist. Run `bun run build` first (or invoke `bun run bench` after a fresh build).
-- **HTTP bench** spawns a production server on a free port using SQLite at `.tmp/benchmarks/bench-<port>.db`. If `.tmp/dev.db` is present it's cloned as the seed; otherwise the server boots from empty migrations. No external services required.
+- **HTTP bench** spawns a production server on a free port. The server talks to a self-hosted Convex backend, so set `CONVEX_SELF_HOSTED_URL` (+ admin key) in the environment before running — the bench does not provision one.
 - **Plugin bench** boots a fresh QuickJS-WASM context per scenario — no plugin code from disk, just synthetic plugin sources defined in `benches/plugin.ts`.
 - **Health bench** shells out to `fallow`, `jscpd`, and `madge` via `bunx`. Add a `--skip=health` if those tools are slow on a particular machine.
 - **Browser bench** runs under Playwright with its pinned Chromium. The browser binary is NOT in `bun install` — run `bun run bench:browser:install` once (~92 MiB headless Chromium download). Alternatively, pass `--chrome-path=PATH` to a system Chrome / Chromium / Edge / Brave / Arc. If neither is available the bench self-skips with a clear message rather than crashing the run.
@@ -71,16 +69,6 @@ Drives `publishPage()` (the core page-tree → HTML/CSS function) against synthe
 - **CSS bundle build:** cost of `buildSiteCssBundle()` as the user-class catalog grows.
 
 This is the *user-facing output speed* — what visitors will see.
-
-### publish
-Exercises the FULL publish pipeline and the public serving path against an isolated SQLite DB (the same migrations the production server runs), seeded through the real repositories (`saveDraftSite` + `createDataRow`). Each scenario reports an `unavailable: <reason>` row instead of crashing the suite when seeding fails. Scenarios:
-- **Full publish wall time scaling** — `publishDraftSite` over N draft pages of ~150 nodes each (10 / 40; quick 5 / 15), including the snapshot bake and the Layer A artefact write to a tmp uploads dir. Also reports the on-disk SQLite growth (main + WAL) per publish — the snapshot storage amplification.
-- **Publish status check** — `getDraftPublishStatus` on the published site: the draft-vs-published comparison the admin UI polls.
-- **Warm dynamic-route serving** — repeated `renderPublicResolution` for one published page WITHOUT an uploadsDir, forcing the dynamic path (route resolution + the module-level Layer B LRU). The first call warms the cache; the timed calls are real warm hits.
-- **404 probe cost** — `renderPublicResolution` on a missing path plus `getSetupStatus`, modelling what the router pays per unmatched GET.
-- **Published row-route lookup** — `getPublishedDataRowByRoute` against a data table with 10,000 published rows (quick 2,000), each with an active version. Sensitive to indexing on the versions join.
-
-Where the `publisher` bench measures the pure render function, this bench measures the whole DB-backed publish + serve lifecycle.
 
 ### editor-store
 Drives the live Zustand store. **This is the "is the builder laggy at scale?" bench.** Scenarios:
@@ -99,12 +87,6 @@ Starts a production-mode server on a free port (or uses `--base-url=...`) and be
 - **Sequential latency:** 100 reqs to `/health`, `/admin`, `/admin/site`, and the biggest first-paint JS/CSS/vendor chunks.
 - **Concurrent throughput:** 3,000 reqs at c=1, 4, 16, 64 against `/health`, `/admin`, and the largest static asset.
 - **Server resource usage:** boot time + RSS before/after load.
-
-### db
-Spins up isolated SQLite DBs (the same migrations the production server runs) and measures:
-- **Cold migrations** — full schema drop+recreate
-- **Single-row inserts** at 100 / 1k / 10k row counts
-- **List queries on populated tables** — count(\*), `select … limit 50`, indexed slug lookup, sequential LIKE scan
 - **JSON column round-trip** for small / medium / large `cells_json` payloads (5 → 1000 nodes)
 
 Each scenario uses a fresh DB file so the row counts are comparable.
@@ -161,20 +143,6 @@ You'll get a frame-by-frame scrubber with DOM snapshots, network waterfall, cons
 
 **Future scenarios** to layer on: drag interactions on the canvas, programmatic class-creation through the editor store (would need a small dev-only hook to expose the store on `window`), Lighthouse-style INP for interactions, mobile viewport runs, CPU throttling.
 
-### snapshot-tokens (opt-in)
-Measures how many tokens the site-editor agent's page **read surface** costs, comparing the two representations of the same page:
-
-- **JSON** — the legacy read surface (deleted): `inspect_page` (full node tree) + `list_classes` (all CSS classes) + `list_tokens` (design tokens), each `JSON.stringify`'d exactly as the old tools emitted them into a `tool_result`. Rebuilt by a local `flattenForBench` that reproduces the deleted `buildPageSnapshot` node/class/token mapping, so this regression guard keeps measuring the surface that `read_document` replaced.
-- **read_document** — the live first `read_document` result from `renderAgentDocument(...)`, counted as the exact serialized tool payload including `pageInfo`. It contains annotated body HTML with a `uid` on each tag plus page-relevant CSS wrapped in a `<style>` block. The CSS includes framework variables/utilities, font token variables, active-page module CSS, used class rules, applicable ambient selectors, and page-targeted user stylesheets. It omits browser-only `@font-face` blocks, unrelated cross-page ambient selectors, long base64/data URLs, and very long URLs. Oversized pages report `pageInfo.nextPart` so follow-up `read_document({ part })` calls can retrieve the remaining cleaned slices.
-
-Tokens are counted with Anthropic's `count_tokens` endpoint (model-accurate, no SDK) against the **real seeded pages** in `.tmp/dev.db`. The report gives per-page and aggregate JSON-vs-read_document token counts and a ratio, plus fairness/fidelity facts it deliberately surfaces: how many `@media` breakpoint blocks the counted CSS carries, how many nodes got annotated, and how many carry per-node prop overrides that live in the JSON tree but not in the published CSS (responsive styling that flows through included class `@media` blocks is counted on the read_document side).
-
-The HTML read surface has shipped (`read_document` replaced the five legacy JSON tools). This bench now serves as a **regression guard** — confirming the first size-budgeted read remains cheaper than the legacy JSON surface it replaced. It is **opt-in**: it needs `ANTHROPIC_API_KEY` and a seeded dev DB, and it makes one network call per measured string. Run it with:
-```bash
-ANTHROPIC_API_KEY=sk-... bun run bench --only=snapshot-tokens
-```
-With no key or no seeded DB it self-skips with an actionable message rather than crashing the suite. Rationale: [`docs/features/agent.md` → Why HTML-native](../../docs/features/agent.md#why-html-native).
-
 ## Architecture
 
 ```
@@ -190,10 +158,8 @@ scripts/bench/
   benches/
     bundle.ts                 ← Dist composition
     publisher.ts              ← Page-tree → HTML pipeline
-    publish.ts                ← Full publish pipeline + public serving (DB-backed)
     editor-store.ts           ← Class & tree mutation stress
     http.ts                   ← Network latency + throughput
-    db.ts                     ← SQLite performance
     plugin.ts                 ← QuickJS sandbox cost
     footprint.ts              ← Disk / SLOC / deps
     health.ts                 ← fallow + jscpd + madge

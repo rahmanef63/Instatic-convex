@@ -23,16 +23,9 @@ Catalog of every test in `src/__tests__/architecture/`. These are structural gat
 
 See [CLAUDE.md → Barrel imports](../../CLAUDE.md) and [docs/reference/page-tree.md](page-tree.md).
 
-### Database — schema and dialect
+### Data layer (Convex)
 
-| Test                                          | What it enforces                                                                 |
-|-----------------------------------------------|----------------------------------------------------------------------------------|
-| `db-postgres-isms.test.ts`                    | Files that import `DbClient` use only ANSI SQL. Blocks `now()` in DML, `::int`, `::jsonb`, `any($N::...)`, `distinct on`. |
-| `db-json-column-naming.test.ts`               | Every `jsonb` PG column has a name ending in `_json`. Same column appears in SQLite migrations as `text`. |
-| `migration-parity.test.ts`                    | `migrations-pg.ts` and `migrations-sqlite.ts` have identical migration IDs in the same order. |
-| `json-extract-egress.test.ts`                 | `JSON.parse` of stored data goes through a TypeBox boundary helper.              |
-
-See [docs/reference/database-dialects.md](database-dialects.md).
+The data layer is native, self-hosted Convex. `convex/schema.ts` is the schema contract — Convex validates it at deploy time — so there is no SQL-dialect, migration-parity, or Postgres-ism gate. The `*_json`, `by_app_id`, and explicit-`JSON.parse` conventions are documented in [docs/reference/database-dialects.md](database-dialects.md); parsing persisted JSON through a TypeBox helper is enforced by the general `boundary-validation.test.ts` gate.
 
 ### Content storage
 
@@ -234,7 +227,6 @@ See [docs/features/site-transfer.md](../features/site-transfer.md).
 | Test                                          | What it enforces                                                                 |
 |-----------------------------------------------|----------------------------------------------------------------------------------|
 | `loop-source-id-format.test.ts`               | Loop source ids are namespaced lowercase (`base.x`, `acme.y`).                  |
-| `loop-source-sql-safety.test.ts`              | Built-in loop sources don't issue dialect-specific or unsanitized SQL.           |
 
 ### Bundle / performance
 
@@ -285,28 +277,24 @@ describe('No `as Foo` at JSON boundaries', () => {
 
 ### Schema check
 
-Reads a typed manifest (e.g. `pgMigrations`) and asserts shape:
+Reads a typed manifest and asserts shape:
 
 ```ts
-import { pgMigrations } from '../../../server/db/migrations-pg'
-import { sqliteMigrations } from '../../../server/db/migrations-sqlite'
+import { CORE_CAPABILITIES } from '../../core/capabilities'
 
-it('migration IDs match across dialects', () => {
-  const pgIds     = pgMigrations.map((m) => m.id)
-  const sqliteIds = sqliteMigrations.map((m) => m.id)
-  expect(sqliteIds).toEqual(pgIds)
+it('every capability id is namespaced lowercase', () => {
+  const bad = CORE_CAPABILITIES.filter((c) => !/^[a-z]+(\.[a-z]+)+$/.test(c))
+  expect(bad).toEqual([])
 })
 ```
 
 ### Integration-style
 
-Spins up a small in-memory SQLite, runs migrations, exercises a code path, asserts:
+Exercises a real code path end-to-end and asserts on the result — e.g. drive a repository (which delegates to Convex) against a seeded test backend:
 
 ```ts
-const db = createSqliteClient(':memory:')
-await runMigrations(db, sqliteMigrations)
-await createDataRow(db, ...)
-const rows = await listDataRows(db, 'posts')
+await createDataRow({ tableId: 'posts', /* … */ })
+const rows = await listDataRows('posts')
 expect(rows).toHaveLength(1)
 ```
 
@@ -317,7 +305,7 @@ expect(rows).toHaveLength(1)
 Add an architecture test when:
 
 - A structural invariant is easy to violate accidentally (e.g. "all icons come from `pixel-art-icons`").
-- A naming convention is load-bearing (e.g. JSON columns end in `_json` because the SQLite adapter auto-parses them).
+- A naming convention is load-bearing (e.g. JSON columns end in `_json` because every read site parses them through a TypeBox schema).
 - A directory boundary needs enforcement (e.g. "no `react-router-dom` in admin code").
 - A new permission / capability / event kind needs all sync-points wired (e.g. `cms.pages.read` exists in 4 places).
 
@@ -331,7 +319,7 @@ Don't add a gate for:
 
 - Use kebab-case, topic first: `<topic>.test.ts` or `<group>-<topic>.test.ts`.
 - Avoid `task<N>` / `phase<N>` / `guideline<N>` unless you genuinely tracking a multi-PR refactor mid-flight (and rename when the refactor lands).
-- Keep file names short — agents grep these. `db-postgres-isms.test.ts` is good. `database-dialect-mismatch-detector-no-postgresisms.test.ts` is bad.
+- Keep file names short — agents grep these. `admin-router-usage.test.ts` is good. `admin-navigation-must-not-use-react-router-dom-anywhere.test.ts` is bad.
 
 ---
 

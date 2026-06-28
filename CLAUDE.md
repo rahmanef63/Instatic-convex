@@ -28,7 +28,7 @@ When publishing work:
 
 ## What this project is
 
-A self-hosted, open-source CMS with a built-in visual editor and a first-class plugin system. One Bun server backed by either Postgres or SQLite (selected by `DATABASE_URL`). The output is intentionally plain, semantic HTML with hand-clean CSS — no framework runtimes injected into published pages.
+A self-hosted, open-source CMS with a built-in visual editor and a first-class plugin system. One Bun server backed by a native, self-hosted Convex data layer. The output is intentionally plain, semantic HTML with hand-clean CSS — no framework runtimes injected into published pages.
 
 The product is **self-hosted only**. The codebase should not carry assumptions about multi-tenant SaaS operation.
 
@@ -40,7 +40,7 @@ Read [`docs/architecture.md`](docs/architecture.md) for the system overview, [`d
 - **Language:** TypeScript everywhere.
 - **Frontend:** React 19 with the **React Compiler enabled** (Babel preset in `vite.config.ts`) + Vite, Zustand + Mutative for state (via `zustand-mutative`; patch-based undo history uses Mutative `create({ enablePatches })` — `immer` is banned), CodeMirror for code-editing UI, `@dnd-kit/core` for drag-and-drop. The compiler auto-memoizes — do not hand-write `useMemo`/`useCallback`/`memo`. See "React Compiler and memoization". Store mutations use draft-mutation style (`set((s) => { s.x = … })`); a recipe that returns a partial must wrap it in `rawReturn(...)` or Mutative emits a perf warning.
 - **Server:** `Bun.serve` with a hand-written router (`server/router.ts`). CMS modules at `server/{repositories,handlers/cms,auth,plugins,publish}/`. Deep dive: [`docs/server.md`](docs/server.md).
-- **Database:** Postgres (`Bun.sql`) OR SQLite (`bun:sqlite`), selected by `DATABASE_URL`. One `DbClient` interface, two adapters, two migration files with identical IDs. Rules: [`docs/reference/database-dialects.md`](docs/reference/database-dialects.md).
+- **Data layer:** Native, self-hosted Convex. Schema in `convex/schema.ts`, query/mutation functions in `convex/*.ts`. The `server/repositories/*.ts` are thin pass-throughs that delegate to Convex through `server/convex/client.ts` (`getConvex().query/mutation(api.<module>.<fn>)`) — their public signatures are frozen, all logic lives in the Convex functions. App-generated nanoid PKs are stored as an indexed `v.string()` field looked up via the `by_app_id` index, never Convex's `_id`; `*_json` columns stay raw `v.string()`. Rules: [`docs/reference/database-dialects.md`](docs/reference/database-dialects.md). Architecture: [`docs/CONVEX-MIGRATION.md`](docs/CONVEX-MIGRATION.md).
 - **Content model:** All content lives in `data_tables` + `data_rows`. The four system tables (`posts`, `pages`, `components`, `layouts`) are seeded and locked from rename/delete. There are no separate `pages` or `page_versions` tables.
 - **Validation:** TypeBox at every untyped boundary. Schemas are source of truth (`type Foo = Static<typeof FooSchema>`, never a parallel `interface`). `zod` is banned repo-wide (the AI drivers pass TypeBox schemas through as JSON Schema, so no typebox→zod adapter is needed). Helpers + patterns: [`docs/reference/typebox-patterns.md`](docs/reference/typebox-patterns.md).
 - **Sanitization:** DOMPurify at the publisher boundary (`src/core/sanitize.ts`).
@@ -55,7 +55,8 @@ Read [`docs/architecture.md`](docs/architecture.md) for the system overview, [`d
 ### Repo layout
 
 ```
-server/         Bun server: router, handlers, repositories, auth, plugins, publish, db
+server/         Bun server: router, handlers, repositories, auth, plugins, publish, convex client
+convex/         Convex data layer: schema.ts + per-module query/mutation functions
 src/admin/      Admin app (React) — shell, workspaces, plugin host UI
 src/admin/pages/site/   Visual editor (canvas, panels, toolbar, editor store)
 src/core/       Engine: page tree, publisher, plugin SDK + runtime, persistence
@@ -111,9 +112,9 @@ What you must not do:
 
 There is no production data to protect. Treat the schema like code:
 
-- If a column, table, or migration is wrong, change the migration. Do not write a "compatibility migration" on top of a bad migration.
+- If a column, table, or index is wrong, change `convex/schema.ts` (and the affected `convex/*.ts` functions). Convex applies schema changes on deploy — there is no migration file to layer a "compatibility migration" on top of.
 - If stored shapes (page trees, plugin manifests, settings) need to change, change them and update everything that reads/writes them.
-- Local dev databases are disposable. It is acceptable for a change to require dropping the local DB and re-running migrations from scratch.
+- Local dev data is disposable. It is acceptable for a change to require wiping the dev Convex backend and re-deploying the schema from scratch.
 
 ### Plugin SDK and public-looking surfaces
 
@@ -218,17 +219,17 @@ Every untyped boundary uses TypeBox. Inside the boundary, code trusts the parsed
 
 ---
 
-## Database dialect rules
+## Data layer rules
 
-Detailed: [`docs/reference/database-dialects.md`](docs/reference/database-dialects.md). The three rules:
+Detailed: [`docs/reference/database-dialects.md`](docs/reference/database-dialects.md). Architecture: [`docs/CONVEX-MIGRATION.md`](docs/CONVEX-MIGRATION.md). The rules:
 
-1. **Repositories are dialect-naive.** Use ANSI-standard SQL only. The five Postgres-isms — `now()` in DML, `::int`, `::jsonb`, `any($N::...)`, `distinct on` — are banned in any `DbClient`-importing file under `server/`. Gated by `db-postgres-isms.test.ts`.
-2. **JSON columns end in `_json`.** The SQLite adapter auto-parses `*_json` strings on read and auto-stringifies plain objects on write. Gated by `db-json-column-naming.test.ts`.
-3. **Migrations are split per dialect with identical IDs.** `server/db/migrations-pg.ts` (PG dialect) and `server/db/migrations-sqlite.ts` (SQLite dialect). Parity gated by `migration-parity.test.ts`.
+1. **Repositories are thin pass-throughs.** Every `server/repositories/*.ts` function keeps its frozen signature and just marshals args to a Convex call via `server/convex/client.ts` (`getConvex().query/mutation(api.<module>.<fn>, args)`). All real logic — ownership checks, soft-delete filters, read-before-write, hand-assembled joins — lives in the matching `convex/*.ts` function.
+2. **App-generated PKs use the `by_app_id` index, not `_id`.** Each table stores its nanoid (or composite/natural key) as an indexed `v.string()` field. Convex's `_id` is an internal handle used only for `ctx.db.patch`/`delete` after a lookup by app id; it never appears in return shapes, the REST API, or export bundles. Cross-table references stay `v.string()` app ids.
+3. **`*_json` columns stay opaque strings.** JSON blobs (`cells_json`, `manifest_json`, `settings_json`, …) are `v.string()` and are `JSON.parse`d explicitly in app code — there is no auto-parse. Any field that needs to be filtered, sorted, or searched is hoisted to its own top-level field with its own index.
 
-**Adding a new migration:** add it to BOTH `migrations-pg.ts` and `migrations-sqlite.ts` with the same ID and the same semantic effect.
+**Changing the schema:** edit `convex/schema.ts` (and the `convex/*.ts` functions that read/write the changed shape). Convex applies the schema on deploy — there are no migration files and no DDL at boot.
 
-**Adding a JSON column:** name it `*_json`.
+**Adding a JSON column:** name it `*_json` and parse it explicitly at every read site.
 
 ---
 
@@ -291,7 +292,7 @@ Note: `@core/framework-schema` is a dependency of both `@core/page-tree` (for `F
 - Always use `bun` (not `npm` / `pnpm` / `yarn`) for installs, scripts, and tests.
 - Lockfile is `bun.lock`. Do not introduce `package-lock.json` or `yarn.lock`.
 - Server scripts run with `bun --watch server/index.ts`. Frontend dev runs with `vite`.
-- Run the full stack locally with `bun run dev` (defaults to SQLite at `.tmp/dev.db` — no external dependencies) or `docker compose up --build` (everything in containers with Postgres). Set `DATABASE_URL=postgres://...` before `bun run dev` to use Postgres instead.
+- Run the full stack locally with `bun run dev`. The server needs a Convex backend to talk to: set `CONVEX_SELF_HOSTED_URL` (or `CONVEX_URL`) and a Convex admin key in `.env.local` so `server/convex/client.ts` can connect — there is no local database file. Stand up or point at a self-hosted Convex backend per [`docs/DEPLOY-CONVEX.md`](docs/DEPLOY-CONVEX.md).
 - **`bun run build` runs `tsc -b && vite build`** — both type-checking and bundling. A change that runs in dev but fails `tsc` is not done.
 
 ## Verification

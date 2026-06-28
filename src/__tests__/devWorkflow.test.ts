@@ -24,13 +24,6 @@ describe('development workflow', () => {
     // Spawns cms + vite directly (no recursive `bun run dev` call).
     expect(script).toContain('bun --watch server/index.ts')
     expect(script).toContain('vite --host 127.0.0.1')
-    // Knows about the docker postgres host port.
-    expect(script).toContain('127.0.0.1')
-    expect(script).toContain('5433')
-    // Manages the docker postgres + app containers.
-    expect(script).toContain('compose')
-    expect(script).toContain('postgres')
-    expect(script).toContain('app')
     // Forwards signals to children.
     expect(script).toContain('SIGINT')
     expect(script).toContain('SIGTERM')
@@ -65,16 +58,5 @@ describe('development workflow', () => {
     const viteConfig = readSiteFile('vite.config.ts')
 
     expect(viteConfig).toContain("pathname.startsWith('/_instatic/assets/')")
-  })
-
-  it('Docker Postgres uses a non-default host port for local dev', () => {
-    const compose = readSiteFile('docker-compose.yml')
-
-    // docker-compose.yml is dev-only and only exposes the Postgres container
-    // on a non-default host port (5433) to avoid clashing with a local
-    // Postgres install. The DATABASE_URL the app uses to reach the container
-    // lives in compose.prod.yml — not in the dev-only compose file.
-    expect(compose).toContain('"5433:5432"')
-    expect(compose).toContain('image: postgres:16')
   })
 })

@@ -2,20 +2,12 @@ import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
 describe('self-host docker config', () => {
-  it('defines a postgres dev service for `bun run dev` to manage', () => {
-    const compose = readFileSync('docker-compose.yml', 'utf8')
-    expect(compose).toContain('postgres:')
-    expect(compose).toContain('postgres:16')
-  })
-
-  it('defines a persistent postgres volume in the dev compose', () => {
-    const compose = readFileSync('docker-compose.yml', 'utf8')
-    expect(compose).toContain('postgres_data:')
-  })
-
-  it('documents required environment variables', () => {
+  it('documents the Convex backend connection in the env template', () => {
     const env = readFileSync('.env.example', 'utf8')
-    expect(env).toContain('DATABASE_URL=')
+    // The server has no local datastore — it reaches Convex through these vars
+    // (server/convex/client.ts). The template must document the URL var and the
+    // non-database runtime paths.
+    expect(env).toContain('CONVEX_SELF_HOSTED_URL=')
     expect(env).toContain('UPLOADS_DIR=')
   })
 
@@ -53,47 +45,34 @@ describe('self-host docker config', () => {
     expect(serverIndex).toContain("'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS'")
   })
 
-  it('defines a production compose stack with health checks and persistent data', () => {
+  it('defines a production compose stack that points the app at the Convex backend', () => {
     const compose = readFileSync('compose.prod.yml', 'utf8')
     const buildOverride = readFileSync('compose.build.yml', 'utf8')
 
     expect(compose).toContain('ghcr.io/corebunch/instatic:latest')
     expect(compose).not.toContain('build:')
     expect(compose).toContain('restart: unless-stopped')
-    expect(compose).toContain('condition: service_healthy')
-    expect(compose).toContain('postgres_data:')
+    // The app is a Convex client — it reaches its data layer over HTTP at the
+    // self-hosted Convex backend (a separate compose). There is no bundled
+    // database service in this file.
+    expect(compose).toContain('CONVEX_SELF_HOSTED_URL')
+    expect(compose).toContain('CONVEX_SELF_HOSTED_ADMIN_KEY')
+    expect(compose).not.toContain('postgres')
     expect(compose).toContain('uploads:')
     expect(buildOverride).toContain('build:')
     expect(buildOverride).toContain('dockerfile: Dockerfile')
-  })
-
-  it('lets compose.prod.yml load without an .env (so SQLite mode is zero-config) while making the Postgres password placeholder loudly unsafe', () => {
-    // Why this rule exists:
-    // SQLite mode (compose.sqlite.yml override) disables the postgres service
-    // and replaces the app's DATABASE_URL — Postgres credentials are unused.
-    // But compose's `${VAR:?error}` interpolation runs at FILE LOAD TIME,
-    // before profiles or overrides are applied. A `:?` guard on POSTGRES_PASSWORD
-    // forces SQLite users to invent a `.env` for a service they aren't running.
-    //
-    // Contract instead:
-    //   1. No `:?` guard on POSTGRES_PASSWORD — file loads with empty env.
-    //   2. The placeholder default value MUST be obviously unsafe (must contain
-    //      the literal string CHANGEME) so a Postgres operator who forgets to
-    //      override it sees the placeholder in their running container's
-    //      env / logs and rotates it.
-    const compose = readFileSync('compose.prod.yml', 'utf8')
-
-    expect(compose).not.toContain('${POSTGRES_PASSWORD:?')
-    expect(compose).toContain('CHANGEME')
   })
 
   it('defines production environment variables required by the compose stack', () => {
     const env = readFileSync('.env.production.example', 'utf8')
     const compose = readFileSync('compose.prod.yml', 'utf8')
 
-    expect(env).toContain('POSTGRES_PASSWORD=')
+    expect(env).toContain('CONVEX_SELF_HOSTED_URL=')
+    expect(env).toContain('CONVEX_SELF_HOSTED_ADMIN_KEY=')
     expect(env).toContain('INSTATIC_SECRET_KEY=')
     expect(env).toContain('TRUSTED_PROXY_CIDRS=')
+    expect(compose).toContain('CONVEX_SELF_HOSTED_URL:')
+    expect(compose).toContain('CONVEX_SELF_HOSTED_ADMIN_KEY:')
     expect(compose).toContain('INSTATIC_SECRET_KEY:')
     expect(compose).toContain('TRUSTED_PROXY_CIDRS:')
   })

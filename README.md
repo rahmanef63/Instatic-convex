@@ -21,7 +21,7 @@ A self-hosted CMS where the visual editor, content engine, and publisher all liv
 
 <br>
 
-A modern website usually means assembling a stack: a headless CMS, a framework, a host, a form service, an analytics vendor, an image CDN — each with its own bill, dashboard, and 2 a.m. outage. Instatic is the opposite bet. One Bun server holds the whole thing — the canvas editor, the content engine, media, auth, forms, plugins, and the publisher — and you run it wherever you like, backed by SQLite or Postgres.
+A modern website usually means assembling a stack: a headless CMS, a framework, a host, a form service, an analytics vendor, an image CDN — each with its own bill, dashboard, and 2 a.m. outage. Instatic is the opposite bet. One Bun server holds the whole thing — the canvas editor, the content engine, media, auth, forms, plugins, and the publisher — and you run it wherever you like, backed by a self-hosted Convex data layer.
 
 What comes out the other end is the part most builders quietly compromise on: plain semantic HTML and compact CSS, with none of the editor's machinery left behind in the page. No framework runtime, no builder attributes, no div soup. The site loads like a static file because, most of the time, it is one.
 
@@ -29,37 +29,11 @@ What comes out the other end is the part most builders quietly compromise on: pl
 
 <br>
 
-## Deploy in one click
+## Deploy
 
-Railway is the fastest way to get Instatic live. Pick a template, hit the button, wait about two minutes. That's it. It generates the secret keys, attaches the storage volume, and sets up the health checks on its own. You never open a terminal.
+Instatic runs as two halves you stand up together: the **Bun app** (the CMS) and a **self-hosted Convex backend** (the data layer — the entire database lives in the persistent `instatic_convex_data` volume). The canonical path puts both on one host behind Dokploy + Traefik: stand up the Convex backend, push `convex/schema.ts`, then deploy the app. The app reaches Convex over `CONVEX_SELF_HOSTED_URL` + an admin key, and the React admin bundle is built with `VITE_CONVEX_URL`.
 
-<div align="center">
-
-<img src="docs/assets/readme/railway-deploy.gif" alt="Deploying Instatic to Railway — from template to a live CMS in under a minute" width="80%">
-
-*One minute to live. Unedited.*
-
-</div>
-
-<br>
-
-| Provider | Database | Best for | Deploy |
-|---|---|---|---|
-| **Railway** · *Recommended* | SQLite | A single site — blog, portfolio, small business | [Deploy →](https://railway.com/deploy/instatic-cms-sqlite?referralCode=Zm9bVJ&utm_medium=integration&utm_source=template&utm_campaign=generic) |
-| **Railway** | Postgres | Multiple authors, managed backups, room to grow | [Deploy →](https://railway.com/deploy/instatic-cms-postgres?referralCode=Zm9bVJ&utm_medium=integration&utm_source=template&utm_campaign=generic) |
-| **Render** | — | — | *Coming soon* |
-| **Fly.io** | — | — | *Coming soon* |
-| **DigitalOcean** | — | — | *Coming soon* |
-
-SQLite is the right default for most sites. Reach for Postgres when you've got a team of authors or want managed database backups.
-
-Prefer your own hardware? Instatic is a single Docker image:
-
-```sh
-INSTATIC_IMAGE=ghcr.io/corebunch/instatic:latest docker compose -f compose.prod.yml -f compose.sqlite.yml up -d
-```
-
-Full guides for VPS, Postgres, HTTPS with Caddy, Render, and backups are in [docs/deployment](docs/deployment/README.md).
+Full deploy reference: [docs/DEPLOY-CONVEX.md](docs/DEPLOY-CONVEX.md). Guides for VPS, HTTPS with Caddy, the Docker image contract, and backups: [docs/deployment](docs/deployment/README.md).
 
 <br>
 
@@ -159,7 +133,7 @@ What comes out the other end is plain HTML and compact CSS, all the way down. No
 
 ## Quick start
 
-You need [Bun](https://bun.sh). Nothing else. The default dev setup runs on SQLite, so there are no extra services to stand up.
+You need [Bun](https://bun.sh) and a self-hosted Convex backend for the data layer — point the dev server at it with `CONVEX_SELF_HOSTED_URL` and an admin key in `.env.local` ([how](docs/DEPLOY-CONVEX.md)).
 
 ```sh
 git clone https://github.com/corebunch/instatic.git
@@ -172,7 +146,7 @@ Open `http://localhost:5173`. The first visit walks you through creating your si
 
 Want to see it the way it actually ships? `bun run start` builds the admin and serves it from the Bun server at `http://localhost:3001/admin`.
 
-> **Backups, in one sentence:** back up the database (a Postgres dump or the SQLite file) and the uploads folder, and you've backed up the whole site — [details](docs/deployment/backup-restore.md).
+> **Backups, in one sentence:** back up the Convex data volume (`instatic_convex_data`) and the uploads folder, and you've backed up the whole site — [details](docs/deployment/backup-restore.md).
 
 <br>
 
@@ -211,7 +185,7 @@ One Bun server. A React admin built with Vite. A publisher that emits pages you'
 | **Language** | TypeScript everywhere |
 | **Admin app** | React 19 (React Compiler on), Vite, Zustand + Mutative, CodeMirror, dnd-kit |
 | **Server** | `Bun.serve` with a hand-written router |
-| **Database** | SQLite or Postgres — one `DbClient` interface, picked by `DATABASE_URL` |
+| **Data layer** | Native, self-hosted Convex — schema in `convex/schema.ts`, repos delegate via `server/convex/client.ts` |
 | **Validation** | TypeBox at every untyped boundary; schemas are the source of truth |
 | **Plugins** | QuickJS-WASM sandbox, owner-granted permissions |
 | **AI** | Provider-agnostic drivers over raw HTTP/SSE, no vendor SDKs |

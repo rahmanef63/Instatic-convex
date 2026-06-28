@@ -2,8 +2,7 @@
 # Override for compose.prod.yml that puts a Caddy reverse proxy in front of the
 # CMS, terminating TLS via Let's Encrypt automatically. Stack-on-top usage:
 #
-#   docker compose -f compose.prod.yml -f compose.tls.yml up -d                   # PG + TLS
-#   docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.tls.yml up -d   # SQLite + TLS
+#   docker compose -f compose.prod.yml -f compose.tls.yml up -d
 #
 # What this does:
 #   - Adds a `caddy` service that listens on :80 and :443 (and :443/udp for HTTP/3).

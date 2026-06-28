@@ -11,8 +11,8 @@
  *
  * Read dispatch uses the asset row's `storage_adapter_id`, NOT the
  * currently-elected adapter. That way old assets keep resolving via the
- * adapter that actually wrote them even after an election change — see
- * `migrations-pg.ts:004_media_storage_adapters` for the column.
+ * adapter that actually wrote them even after an election change — the
+ * `storage_adapter_id` column lives on the media-asset table in `convex/schema.ts`.
  */
 
 import { isoDate } from '@core/utils/isoDate'

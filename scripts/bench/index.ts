@@ -29,30 +29,23 @@ import type { BenchModule, BenchResult, BenchContext } from './lib/types'
 
 import { bundleBench } from './benches/bundle'
 import { publisherBench } from './benches/publisher'
-import { publishBench } from './benches/publish'
 import { editorStoreBench } from './benches/editor-store'
 import { httpBench } from './benches/http'
-import { dbBench } from './benches/db'
 import { pluginBench } from './benches/plugin'
 import { footprintBench } from './benches/footprint'
 import { healthBench } from './benches/health'
 import { browserBench } from './benches/browser'
-import { snapshotTokensBench } from './benches/snapshot-tokens'
 
 const REPO_ROOT = resolve(import.meta.dir, '../..')
 
-// `browser` and `snapshot-tokens` are NOT in the default run. `browser` needs
-// Chromium and optional INSTATIC_BENCH_ADMIN_EMAIL / INSTATIC_BENCH_ADMIN_PASSWORD
-// credentials for authenticated scenarios; `snapshot-tokens` needs ANTHROPIC_API_KEY
-// + a seeded .tmp/dev.db and makes network calls to count_tokens. Run them
-// explicitly, e.g. `bun run bench --only=snapshot-tokens`.
+// `browser` is NOT in the default run: it needs Chromium and optional
+// INSTATIC_BENCH_ADMIN_EMAIL / INSTATIC_BENCH_ADMIN_PASSWORD credentials for
+// authenticated scenarios. Run it explicitly, e.g. `bun run bench --only=browser`.
 const DEFAULT_BENCHES: readonly BenchModule[] = [
   bundleBench,
   publisherBench,
-  publishBench,
   editorStoreBench,
   httpBench,
-  dbBench,
   pluginBench,
   footprintBench,
   healthBench,
@@ -61,7 +54,6 @@ const DEFAULT_BENCHES: readonly BenchModule[] = [
 const ALL_BENCHES: readonly BenchModule[] = [
   ...DEFAULT_BENCHES,
   browserBench,
-  snapshotTokensBench,
 ]
 
 interface CliFlags {

@@ -26,11 +26,12 @@ await rm(`${DATABASE_PATH}-wal`, { force: true })
 await rm(UPLOADS_DIR, { force: true, recursive: true })
 
 // Shared by both children: the CMS port drives the Vite dev proxy target, so the
-// admin UI talks to this disposable CMS instead of any regular dev server.
+// admin UI talks to this disposable CMS instead of any regular dev server. The
+// CMS connects to a self-hosted Convex backend via CONVEX_SELF_HOSTED_URL /
+// CONVEX_URL / CONVEX_SELF_HOSTED_ADMIN_KEY, inherited from `...process.env`.
 const sharedEnv = {
   ...process.env,
   PORT: CMS_PORT,
-  DATABASE_URL: `sqlite:${DATABASE_PATH}`,
   UPLOADS_DIR,
 }
 

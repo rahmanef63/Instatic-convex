@@ -1,18 +1,14 @@
 # HTTPS via Caddy (compose.tls.yml)
 
-The `compose.tls.yml` override runs a Caddy reverse proxy in front of the CMS, terminating TLS at a real domain with auto-provisioned Let's Encrypt certificates. It composes on top of either the Postgres or SQLite production stack — pick whichever DB mode you want, then add `-f compose.tls.yml`.
+The `compose.tls.yml` override runs a Caddy reverse proxy in front of the CMS app, terminating TLS at a real domain with auto-provisioned Let's Encrypt certificates. It composes on top of the production app stack — add `-f compose.tls.yml` to the app's Compose command. (The data layer is a separate self-hosted Convex backend — see [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md).)
 
 ---
 
 ## TL;DR
 
-Set `DOMAIN`, keep `Caddyfile` beside `compose.tls.yml`, then layer the TLS override onto the VPS Compose command:
+Set `DOMAIN`, keep `Caddyfile` beside `compose.tls.yml`, then layer the TLS override onto the app's Compose command:
 
 ```sh
-# SQLite + TLS
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.tls.yml -f compose.build.yml up -d --build
-
-# Postgres + TLS
 docker compose -f compose.prod.yml -f compose.tls.yml -f compose.build.yml up -d --build
 ```
 
@@ -33,20 +29,12 @@ DOMAIN=cms.example.com
 LETSENCRYPT_EMAIL=ops@example.com   # optional but recommended (cert expiry notices)
 ```
 
-For Postgres installs, keep the same `POSTGRES_PASSWORD` used by [vps.md](vps.md). SQLite installs do not need a database password.
+The app connects to the self-hosted Convex backend over `CONVEX_SELF_HOSTED_URL` + an admin key (see [vps.md](vps.md) and [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md)); the app stack itself has no database password.
 
 ## Bring it up
 
-**Postgres + TLS:**
-
 ```sh
 docker compose -f compose.prod.yml -f compose.tls.yml -f compose.build.yml up -d --build
-```
-
-**SQLite + TLS:**
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.tls.yml -f compose.build.yml up -d --build
 ```
 
 The first request to `https://cms.example.com` triggers cert issuance (takes a few seconds). Cert state persists in the `caddy_data` named volume across restarts and re-deploys.
@@ -144,16 +132,7 @@ docker compose -f compose.prod.yml -f compose.tls.yml exec caddy caddy reload --
 
 ## Removing TLS
 
-To go back to plain HTTP on `:3001`, keep the same database-mode files and remove only the TLS override.
-
-SQLite:
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.tls.yml down
-docker compose -f compose.prod.yml -f compose.sqlite.yml -f compose.build.yml up -d --build
-```
-
-Postgres:
+To go back to plain HTTP on `:3001`, remove only the TLS override:
 
 ```sh
 docker compose -f compose.prod.yml -f compose.tls.yml down

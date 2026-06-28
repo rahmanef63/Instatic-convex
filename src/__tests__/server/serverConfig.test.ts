@@ -94,7 +94,6 @@ describe('readServerConfig', () => {
   it('uses self-hosted local defaults when no environment values are set', () => {
     expect(readServerConfig({})).toEqual({
       port: 3001,
-      databaseUrl: 'sqlite:./.tmp/dev.db',
       uploadsDir: './uploads',
       staticDir: './dist',
       trustedProxyCidrs: [],
@@ -106,7 +105,6 @@ describe('readServerConfig', () => {
     expect(
       readServerConfig({
         PORT: '4321',
-        DATABASE_URL: 'postgres://instatic:secret@postgres:5432/instatic',
         UPLOADS_DIR: '/srv/instatic/uploads',
         STATIC_DIR: '/srv/instatic/dist',
         TRUSTED_PROXY_CIDRS: '10.0.0.0/8, 192.168.0.0/16, ',
@@ -116,7 +114,6 @@ describe('readServerConfig', () => {
       }),
     ).toEqual({
       port: 4321,
-      databaseUrl: 'postgres://instatic:secret@postgres:5432/instatic',
       uploadsDir: '/srv/instatic/uploads',
       staticDir: '/srv/instatic/dist',
       trustedProxyCidrs: ['10.0.0.0/8', '192.168.0.0/16'],

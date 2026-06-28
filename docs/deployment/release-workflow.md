@@ -2,7 +2,7 @@
 
 This maintainer guide covers publishing Instatic Docker images.
 
-End users do not need this page to deploy Instatic. They follow [railway.md](railway.md), [render.md](render.md), [vps.md](vps.md), or [docker-image.md](docker-image.md). Maintainers use this page to keep `ghcr.io/corebunch/instatic` release tags aligned with source tags and deployment templates.
+End users do not need this page to deploy Instatic. They follow [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md), [vps.md](vps.md), or [docker-image.md](docker-image.md). Maintainers use this page to keep `ghcr.io/corebunch/instatic` release tags aligned with source tags and deployment docs.
 
 ---
 
@@ -28,20 +28,7 @@ Release flow:
 
 ## Pre-Tag Template Updates
 
-Before tagging a release, update every checked-in deployment surface that intentionally pins the release image:
-
-```txt
-docs/deployment/railway.md
-```
-
-The checked-in Render Blueprints use `ghcr.io/corebunch/instatic:latest` for new one-click installs. `scripts/build-release-bundle.ts` rewrites the release-bundle copies to the semver image tag automatically.
-
-After the release image is published, copy the two Render Blueprint files into the dedicated template repositories as their root `render.yaml` files when their non-versioned template configuration changes:
-
-```txt
-corebunch/instatic-render-sqlite
-corebunch/instatic-render-postgres
-```
+Before tagging a release, update any checked-in deployment surface that intentionally pins the release image (example `docker run` / Compose snippets that name a semver tag). `scripts/build-release-bundle.ts` rewrites the release-bundle copies to the semver image tag automatically.
 
 ## Tag A Release
 
@@ -66,31 +53,21 @@ instatic-0.0.1-release-bundle.tar.gz
 
 Release notes should link to:
 
-- [railway.md](railway.md)
-- [render.md](render.md)
+- [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md)
 - [vps.md](vps.md)
 - [docker-image.md](docker-image.md)
 - [backup-restore.md](backup-restore.md)
 
 ## Operator Update Command
 
-Image-based VPS Compose installs update the app container without touching DB/uploads volumes:
+Image-based installs update the app container without touching the `instatic_convex_data` or `uploads` volumes:
 
 ```sh
 docker compose -f compose.prod.yml pull app
 docker compose -f compose.prod.yml up -d
 ```
 
-SQLite installs include the SQLite override when running commands:
-
-```sh
-docker compose -f compose.prod.yml -f compose.sqlite.yml pull app
-docker compose -f compose.prod.yml -f compose.sqlite.yml up -d
-```
-
-Railway installs should use Docker image source and Railway Image Auto Updates rather than connecting to this GitHub repository as a service source.
-
-Render installs use image-backed Blueprints. Operators upgrade by changing the image tag in their Render service or by redeploying from an updated template repository.
+The self-hosted Convex backend is updated independently of the app image — see [DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md).
 
 ## Source Build Testing
 
@@ -117,7 +94,6 @@ The release workflow should:
 - push a semver tag for `v*` tags
 - push `latest` for tagged releases
 - create a release bundle with the Compose files and deployment docs
-- include the Render Blueprint templates in the release bundle
 
 The first release targets `linux/amd64` because QEMU-based arm64 publishing made the tagged workflow too slow to use as a release gate. Add arm64 as a separate native-runner build before advertising multi-arch images.
 
@@ -140,7 +116,6 @@ docker pull ghcr.io/corebunch/instatic:latest
 
 - [deployment/README.md](README.md) — deployment overview
 - [docker-image.md](docker-image.md) — runtime image contract
-- [render.md](render.md) — Render Blueprint contract
+- [docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md) — self-hosted Convex + app deploy
 - `Dockerfile` — image build
 - `compose.prod.yml` — production image consumer
-- `docs/deployment/render/sqlite/render.yaml`, `docs/deployment/render/postgres/render.yaml` — Render Blueprint templates

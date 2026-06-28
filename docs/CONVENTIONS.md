@@ -43,7 +43,7 @@ Feature docs explain **what the feature is, how it's built, where its code lives
 
 ### 3. Reference (`docs/reference/*.md`)
 
-Short, focused, agent-targeted cookbook pages for primitives and patterns that get reused across features: the `NodeTree` primitive, TypeBox patterns, UI primitive usage, design tokens, database dialect rules, the architecture gate tests.
+Short, focused, agent-targeted cookbook pages for primitives and patterns that get reused across features: the `NodeTree` primitive, TypeBox patterns, UI primitive usage, design tokens, the data layer (Convex), the architecture gate tests.
 
 A reference doc answers one question: "How do I correctly use / implement X?"
 
