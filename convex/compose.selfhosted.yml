@@ -13,8 +13,9 @@
 #   dash-instatic-rahmanef.com  → dashboard:6791  (admin dashboard UI)
 #
 # The Instatic Bun server connects to api-instatic-rahmanef.com as its data
-# backend (server-side via CONVEX_SELF_HOSTED_URL; the React admin client via
-# the VITE_-prefixed public URL). See docs/DEPLOY-CONVEX.md.
+# backend (server-side via CONVEX_SELF_HOSTED_URL + CONVEX_SELF_HOSTED_ADMIN_KEY).
+# The browser never talks to Convex directly — it calls the Bun server's REST
+# API, which mediates every Convex query/mutation. See docs/DEPLOY-CONVEX.md.
 #
 # ─── PERSISTENCE GUARANTEE ──────────────────────────────────────────────────
 # All Convex data lives in the named volume `instatic_convex_data`, mounted at

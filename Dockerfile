@@ -44,6 +44,10 @@ COPY --chown=bun:bun package.json bun.lock ./
 COPY --chown=bun:bun tsconfig*.json ./
 COPY --chown=bun:bun server ./server
 COPY --chown=bun:bun src ./src
+# The Bun server is a Convex *client*: server/convex/client.ts imports the
+# generated `api` reference map at runtime. The function source (convex/*.ts)
+# runs on the backend, not here, so only _generated needs to ship in the image.
+COPY --chown=bun:bun convex/_generated ./convex/_generated
 
 RUN mkdir -p /app/uploads && chown -R bun:bun /app
 
