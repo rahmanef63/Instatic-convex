@@ -29,7 +29,7 @@ The app reads these at runtime (server side):
 | `PUBLIC_ORIGIN` | `https://<your-domain>` | CSRF origin when a proxy terminates TLS |
 | `TRUSTED_PROXY_CIDRS` | e.g. `172.16.0.0/12` | client-IP attribution only (audit logs, rate limits), not CSRF |
 
-The **browser** bundle needs `VITE_CONVEX_URL` (the public Convex URL) at `bun run build` time — Vite inlines it, so pass it as a Docker build arg when building from source. Set `INSTATIC_SECRET_KEY` before adding AI provider credentials, saving plugin secret settings, or enabling TOTP MFA in production.
+The browser never connects to Convex; it calls the Bun server's REST API. Only the server needs `CONVEX_SELF_HOSTED_URL` (+ `CONVEX_SELF_HOSTED_ADMIN_KEY`), as runtime env — there is no Convex build arg. Set `INSTATIC_SECRET_KEY` before adding AI provider credentials, saving plugin secret settings, or enabling TOTP MFA in production.
 
 ## Run the app
 
@@ -51,7 +51,7 @@ docker run -d \
   ghcr.io/corebunch/instatic:<version>
 ```
 
-Build from source with `--build-arg VITE_CONVEX_URL=https://api-<your-domain>` when the admin bundle must point at your own backend rather than the image default.
+Build from source with `docker build -t instatic:local .` — no Convex build arg is needed. The Convex URL and admin key are supplied at `docker run` time (the `-e CONVEX_SELF_HOSTED_URL` / `-e CONVEX_SELF_HOSTED_ADMIN_KEY` flags above), because only the server connects to Convex.
 
 Open `http://server-ip:3001/admin`. The first visit creates the site and admin account.
 
@@ -86,7 +86,7 @@ From a source checkout:
 
 ```sh
 bun install
-VITE_CONVEX_URL=https://api-<your-domain> bun run build
+bun run build
 CONVEX_SELF_HOSTED_URL=https://api-<your-domain> \
   CONVEX_SELF_HOSTED_ADMIN_KEY=<admin key> \
   STATIC_DIR=./dist \
@@ -97,7 +97,7 @@ CONVEX_SELF_HOSTED_URL=https://api-<your-domain> \
   bun run server/index.ts
 ```
 
-`VITE_CONVEX_URL` must be set at build time (Vite inlines it into the admin bundle); `STATIC_DIR` must point at the built SPA (`dist/` after `bun run build`). Wrap the server command in a process supervisor (systemd, pm2, supervisord) for auto-restart, and front it with a TLS proxy, setting `PUBLIC_ORIGIN=https://your-domain` so the CSRF origin check matches the public URL.
+`bun run build` needs no Convex env — the browser never connects to Convex, so nothing about Convex is inlined into the admin bundle. The Convex URL + admin key are server runtime env, set on the `bun run server/index.ts` command above. `STATIC_DIR` must point at the built SPA (`dist/` after `bun run build`). Wrap the server command in a process supervisor (systemd, pm2, supervisord) for auto-restart, and front it with a TLS proxy, setting `PUBLIC_ORIGIN=https://your-domain` so the CSRF origin check matches the public URL.
 
 ## Data safety
 

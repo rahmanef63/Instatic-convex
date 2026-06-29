@@ -34,7 +34,7 @@ PUBLIC_ORIGIN                 comma-separated public origin(s) the CSRF check tr
 TRUSTED_PROXY_CIDRS           optional; trusts proxy peers for forwarded client-IP attribution only — NOT CSRF
 ```
 
-The **browser** admin bundle additionally needs `VITE_CONVEX_URL` (the public Convex URL) at `bun run build` time — Vite inlines it, so it must be a Docker build arg, not just a runtime env.
+The browser never connects to Convex; it calls the Bun server's REST API. Only the server needs `CONVEX_SELF_HOSTED_URL` (+ admin key), as runtime env — there is no Convex build arg, and nothing about Convex is inlined into the admin bundle at `bun run build`.
 
 Generate `INSTATIC_SECRET_KEY` with `bun run scripts/generate-secret-key.ts` before adding Anthropic, OpenAI, or OpenRouter credentials or enabling TOTP MFA in production. Without it, the admin loads but saving reversible secrets fails because there is no stable encryption key.
 

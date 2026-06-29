@@ -22,14 +22,15 @@ Two independently-deployed halves on the same Dokploy + Traefik:
 | **Convex backend** | `convex/compose.selfhosted.yml` | data layer | `api-` / `site-` / `dash-instatic-rahmanef.com` |
 | **Instatic app** | repo-root `Dockerfile` (Bun + Vite custom server) | the CMS | `instatic-rahmanef.com` |
 
-The app is the Convex **client**: the Bun server connects to
-`https://api-instatic-rahmanef.com` server-side; the React admin bundle connects
-to the same URL from the browser.
+The app is the Convex **client** — but only on its server side. The Bun server
+connects to `https://api-instatic-rahmanef.com` server-side. The React admin
+bundle never connects to Convex from the browser; it calls the Bun server's REST
+API (`/admin/api/...`), and the server talks to Convex on its behalf.
 
 ```
                  ┌───────────────────────── Dokploy host ──────────────────────────┐
   instatic-rahmanef.com ─► Traefik ─► instatic app  (Bun :3001, repo Dockerfile)    │
-                                          │  (Convex client, server + browser)       │
+                                          │  (Convex client — server-side only)      │
   api-instatic-rahmanef.com  ─► Traefik ─►│                                          │
   site-instatic-rahmanef.com ─► Traefik ─►├─► convex backend  :3210 / :3211          │
   dash-instatic-rahmanef.com ─► Traefik ─►└─► convex dashboard :6791                 │
@@ -143,33 +144,31 @@ Convex backend (step A) as already standing.
 | sc-all (Next.js) assumes | Instatic reality |
 |---|---|
 | `next build` + standalone output | `bun run build` = `tsc -b && vite build` → `dist/`, run by `bun run server/index.ts` |
-| `NEXT_PUBLIC_CONVEX_URL` inlined at build | Vite uses **`VITE_`-prefixed** vars for the browser bundle (`import.meta.env.VITE_*`); the server reads **plain** env at runtime |
-| One process, public URL baked into JS at build | Two consumers: server-side Bun (runtime env) + React client (build-time `VITE_` env) |
+| `NEXT_PUBLIC_CONVEX_URL` inlined into the browser JS at build | No Convex URL is ever inlined into the browser bundle. The React admin client calls the Bun server's REST API; only the server reads `CONVEX_SELF_HOSTED_URL` (plain runtime env, `CONVEX_URL` fallback) |
+| Public URL baked into JS at build, consumed by the browser | One Convex consumer: the server-side Bun process, reading the URL + admin key as runtime env. The browser never connects to Convex |
 | `CONVEX_DEPLOY_KEY` for Convex Cloud | self-hosted → `CONVEX_SELF_HOSTED_URL` + `CONVEX_SELF_HOSTED_ADMIN_KEY` |
 
-### Env the app needs (two audiences)
+### Env the app needs (server runtime only)
 
-**Server-side (Bun, runtime env on the Dokploy app — read by `server/`):**
+All Convex config is **server-side runtime env** on the Dokploy app (read by
+`server/`). The browser never connects to Convex — it calls the Bun server's REST
+API (`apiRequest` → `/admin/api/...`), and the server talks to Convex. **None of
+these are build args**; they are supplied at `docker run` / compose `environment:`
+time.
 
 | Var | Value | Notes |
 |---|---|---|
-| `CONVEX_SELF_HOSTED_URL` | `https://api-instatic-rahmanef.com` | server→Convex connection. **Not** `NEXT_PUBLIC_CONVEX_URL` — this is server-side Bun |
-| `CONVEX_SELF_HOSTED_ADMIN_KEY` | `<admin key>` | privileged server access / deploy key. Dokploy env secret, never in the image |
+| `CONVEX_SELF_HOSTED_URL` | `https://api-instatic-rahmanef.com` | server→Convex connection (`CONVEX_URL` is the fallback). **Not** `NEXT_PUBLIC_*` / `VITE_*` — server-side Bun runtime env |
+| `CONVEX_SELF_HOSTED_ADMIN_KEY` | `<admin key>` | privileged server access. Dokploy env secret, never in the image |
 | `PORT` | `3001` | already the Dockerfile default |
 | `PUBLIC_ORIGIN` | `https://instatic-rahmanef.com` | CSRF origin (Traefik terminates TLS, app sees plain HTTP) |
 | `TRUSTED_PROXY_CIDRS` | `172.16.0.0/12` | trust the Docker bridge X-Forwarded-For (attribution only) |
 | `INSTATIC_SECRET_KEY` | `<from generate-secret-key>` | AI-credential encryption (existing app secret) |
 
-**Browser-side (React client, must be present at `vite build` time):**
-
-| Var | Value | Notes |
-|---|---|---|
-| `VITE_CONVEX_URL` | `https://api-instatic-rahmanef.com` | the public Convex URL the React admin client connects to. Inlined into the bundle by Vite, so it **must** be a Docker build-arg, not just a runtime env (mirrors the sc-convex `NEXT_PUBLIC_CONVEX_URL`-at-build lesson, but with the `VITE_` prefix) |
-
-> The Dockerfile must accept `VITE_CONVEX_URL` as an `ARG` and export it as `ENV`
-> before `bun run build`, exactly like the sc-convex `ARG NEXT_PUBLIC_CONVEX_URL`
-> pattern — otherwise the deployed admin JS connects to the wrong (or a dummy)
-> backend. This Dockerfile change is part of the BLOCKED rewrite, not done yet.
+> The browser bundle needs no Convex env at all — Vite inlines nothing about
+> Convex. The React admin client reaches the data layer purely through the Bun
+> server's REST API, so the Convex URL + admin key live only as server runtime
+> env. The Dockerfile takes no Convex build arg.
 
 ### Deploy command (when unblocked)
 
@@ -180,7 +179,6 @@ node ~/.claude/skills/sc-dokploy/scripts/<deploy-app>.js \
   --app instatic-app \
   --domain instatic-rahmanef.com \
   --port 3001 \
-  --build-arg VITE_CONVEX_URL=https://api-instatic-rahmanef.com \
   --env CONVEX_SELF_HOSTED_URL=https://api-instatic-rahmanef.com \
   --env-secret CONVEX_SELF_HOSTED_ADMIN_KEY \
   --env-secret INSTATIC_SECRET_KEY \
@@ -206,8 +204,7 @@ Unblock criteria (tracked in `docs/CONVEX-MIGRATION.md`):
 
 1. `server/` repositories read/write through a Convex client instead of `DbClient`.
 2. `convex/_generated` is generated and committed.
-3. The Dockerfile accepts `ARG VITE_CONVEX_URL` → `ENV` before `bun run build`.
-4. `bun run build`, `bun test`, `bun run lint` green with the Convex data layer.
+3. `bun run build`, `bun test`, `bun run lint` green with the Convex data layer.
 
 Until all four hold, only steps **A** (stand up backend) and **B** (push schema)
 run — they create an empty, idle Convex instance and cost nothing to leave

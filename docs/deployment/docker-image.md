@@ -17,14 +17,14 @@ Run the image with:
 - `INSTATIC_SECRET_KEY` set before configuring AI provider credentials, plugin secret settings, or TOTP MFA
 - `PUBLIC_ORIGIN` set to the site's public origin when a proxy terminates HTTPS in front of the container
 
-The admin **browser** bundle is built with `VITE_CONVEX_URL` (the public Convex URL); when building from source, pass it as a Docker build arg so Vite inlines it. Stand up the Convex backend first — see [docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md).
+The browser never connects to Convex; it calls the Bun server's REST API. Only the server needs `CONVEX_SELF_HOSTED_URL` (+ admin key), as runtime env — the image builds with no Convex build arg. Stand up the Convex backend first — see [docs/DEPLOY-CONVEX.md](../DEPLOY-CONVEX.md).
 
 ## Build Locally
 
 ```sh
 docker build -t instatic:local .
-# point the admin bundle at your backend:
-docker build --build-arg VITE_CONVEX_URL=https://api-<your-domain> -t instatic:local .
+# No Convex build arg is needed. Point the app at your backend at run time with
+# -e CONVEX_SELF_HOSTED_URL / -e CONVEX_SELF_HOSTED_ADMIN_KEY (see Run, below).
 ```
 
 ## Published Image
@@ -72,7 +72,7 @@ The volume holds uploaded media, fonts, plugin packs, and published disk artefac
 | `PUBLIC_ORIGIN` | Behind a TLS-terminating proxy | Comma-separated public origins for the CSRF check, e.g. `https://www.example.com` |
 | `TRUSTED_PROXY_CIDRS` | Optional | Comma-separated trusted proxy CIDRs for client-IP attribution only — **not** used for CSRF. Trust only your real proxy CIDRs; never `0.0.0.0/0` for a public service |
 
-Build-arg (browser bundle): `VITE_CONVEX_URL` — the public Convex URL inlined into the admin JS at `bun run build`.
+No Convex build arg: the browser never connects to Convex (it calls the Bun server's REST API), so nothing about Convex is inlined into the admin JS at `bun run build`. The Convex URL + admin key are server runtime env only — supplied at `docker run` / compose `environment:` time.
 
 `INSTATIC_SECRET_KEY` is the stable AES master key for reversible server secrets, including Anthropic, OpenAI, and OpenRouter credentials and TOTP MFA seeds. If it is missing in production, adding a credential or enabling TOTP MFA fails. If it is rotated or lost, existing stored credentials must be re-entered and TOTP MFA re-enrolled.
 
