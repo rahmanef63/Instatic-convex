@@ -1,0 +1,134 @@
+/* Per-step preview rendered via the typography adapter's `renderPreview`
+ * callback. Inlined into the FrameworkScalePanel step rows. */
+.previewText {
+    --preview-text-size: 12px;
+
+    display: inline-block;
+    color: var(--text);
+    font-size: var(--preview-text-size);
+    line-height: 1.05;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.scalePreview {
+    display: grid;
+    align-content: start;
+    gap: var(--space-xs);
+    list-style: none;
+    margin: 0;
+    padding: var(--space-4xs) 0 0;
+}
+
+.typeSpecimen {
+    --type-min-size: 12px;
+    --type-max-size: 16px;
+
+    display: grid;
+    gap: var(--space-4xs);
+    min-width: 0;
+    padding: var(--space-3xs) 0 var(--space-xs);
+}
+
+.typeSpecimenHeader {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: var(--space-m);
+    min-width: 0;
+}
+
+.typeTokenButton {
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    padding: 0;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1.2;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.typeTokenButton:hover,
+.typeTokenButton:active {
+    background: transparent;
+    color: var(--text);
+}
+
+.typeTokenButton > * {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.typeRange {
+    color: var(--text-subtle);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.typeRangeSeparator {
+    padding: 0 var(--space-3xs);
+    color: var(--text-disabled);
+}
+
+.typeRangeUnit {
+    color: var(--text-disabled);
+}
+
+.typeSpecimenLine {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--space-xl);
+    min-width: 0;
+}
+
+.typeSpecimenMin,
+.typeSpecimenMax {
+    display: block;
+    color: var(--text);
+    font-weight: 450;
+    letter-spacing: 0;
+    line-height: 0.86;
+    white-space: nowrap;
+}
+
+.typeSpecimenMin {
+    align-self: end;
+    overflow: hidden;
+    color: var(--text-subtle);
+    font-size: clamp(10px, var(--type-min-size), 34px);
+    text-overflow: ellipsis;
+}
+
+.typeSpecimenMax {
+    justify-self: end;
+    max-width: 100%;
+    overflow: hidden;
+    color: var(--text-bright);
+    font-size: clamp(13px, var(--type-max-size), 82px);
+    text-overflow: clip;
+}
+
+.typeSpecimen[data-base="true"] .typeTokenButton,
+.typeSpecimen[data-base="true"] .typeRange {
+    color: var(--text);
+}
+
+.typeSpecimen[data-base="true"] .typeSpecimenMin,
+.typeSpecimen[data-base="true"] .typeSpecimenMax {
+    color: var(--text-bright);
+}

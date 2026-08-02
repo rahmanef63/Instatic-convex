@@ -1,0 +1,1 @@
+export { TypographyPanel } from './TypographyPanel'

@@ -1,0 +1,24 @@
+/**
+ * Pages widget reader — point-in-time status counts for the `pages`
+ * system table plus a "+N this week" delta of pages published in the
+ * trailing 7 days.
+ */
+import { readPublishedSinceCount, readStatusCounts } from './shared'
+import type { PagesStats } from './types'
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+
+export async function readPagesStats(): Promise<PagesStats> {
+  const sevenDaysAgoIso = new Date(Date.now() - SEVEN_DAYS_MS).toISOString()
+  const [counts, delta] = await Promise.all([
+    readStatusCounts('pages'),
+    readPublishedSinceCount('pages', sevenDaysAgoIso),
+  ])
+  return {
+    total: counts.total,
+    published: counts.published,
+    drafts: counts.drafts,
+    scheduled: counts.scheduled,
+    deltaPublishedThisWeek: delta,
+  }
+}

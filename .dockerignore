@@ -1,0 +1,17 @@
+.git
+.worktrees
+.DS_Store
+node_modules
+dist
+.tmp
+uploads
+data
+backups
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+!.env.example
+!.env.production.example
+docs/superpowers
+src/__tests__

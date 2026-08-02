@@ -1,0 +1,409 @@
+/* AgentPanel — self-contained floating AI assistant panel (Guideline #410) */
+
+/* ── Floating panel outer shell ──────────────────────────────────────────── */
+.floatPanel {
+  position: absolute;
+  /* Position driven by --panel-x / --panel-y CSS vars (useDraggablePanel) */
+  --panel-x: calc(100% - 336px);
+  --panel-y: 200px;
+  left: var(--panel-x);
+  top: var(--panel-y);
+  z-index: 50;
+  width: 320px;
+  height: 480px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  backdrop-filter: blur(var(--panel-blur));
+  border: 1px solid var(--overlay-10);
+  border-radius: 12px;
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+  outline: none;
+  will-change: transform;
+  transform: translateZ(0);
+}
+
+.floatPanelDocked {
+  position: relative;
+  left: auto;
+  top: auto;
+  z-index: auto;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  background: transparent;
+  will-change: auto;
+  transform: none;
+}
+
+/* Always-mounted pattern: display:none hides without unmounting (preserves store state) */
+.floatPanelClosed {
+  display: none;
+}
+
+/* ── Inner panel shell (fill the float container) ────────────────────────── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── Streaming badge — shown in header extra actions slot ────────────────── */
+.streamingBadge {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  pointer-events: none;
+}
+
+.streamingDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Message thread ──────────────────────────────────────────────────────── */
+.thread {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-l) var(--space-l) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-l);
+  min-height: 0;
+}
+
+.errorBanner {
+  padding: var(--space-s) var(--space-m);
+  background: var(--danger-10);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: 6px;
+  color: var(--danger-light);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+/* ── Input bar ───────────────────────────────────────────────────────────── */
+.inputBar {
+  padding: var(--space-l);
+  border-top: 1px solid var(--overlay-10);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+}
+
+.inputForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* Controls row under the textarea: model picker on the left, minimal
+   icon-only send/stop button on the right. Keeps both on one line so the
+   input bar stays compact. */
+.inputControls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-s);
+}
+
+/* The picker takes the leftover width but never crowds out the button. */
+.inputControlsPicker {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* ── MessageBubble ───────────────────────────────────────────────────────── */
+.messageBubble {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.messageBubbleUser {
+  align-items: flex-end;
+}
+
+.messageBubbleAssistant {
+  align-items: flex-start;
+}
+
+.roleLabel {
+  font-size: var(--text-3xs);
+  color: var(--text-disabled);
+  letter-spacing: 0.05em;
+}
+
+.contentBubble {
+  max-width: 90%;
+  padding: var(--space-s) var(--space-m);
+  color: var(--text);
+  font-size: var(--text-s);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--overlay-10);
+}
+
+.contentBubbleUser {
+  border-radius: 10px 10px 2px 10px;
+  background: var(--overlay-10);
+}
+
+.contentBubbleAssistant {
+  border-radius: 2px 10px 10px 10px;
+  background: var(--overlay-5);
+}
+
+/* ── Markdown bubble typography ─────────────────────────────────────────────
+ * Applied alongside .contentBubble when the text is parsed as markdown.
+ * Resets `white-space: pre-wrap` (marked emits proper block elements with
+ * their own whitespace handling — we only want pre-wrap inside <pre>) and
+ * adds the typography rules for the small subset of HTML we accept. */
+.markdownBubble {
+  white-space: normal;
+}
+
+.markdownBubble > :first-child {
+  margin-top: 0;
+}
+
+.markdownBubble > :last-child {
+  margin-bottom: 0;
+}
+
+.markdownBubble p {
+  margin: 0 0 var(--space-s);
+}
+
+.markdownBubble h1,
+.markdownBubble h2,
+.markdownBubble h3,
+.markdownBubble h4,
+.markdownBubble h5,
+.markdownBubble h6 {
+  margin: var(--space-l) 0 var(--space-xs);
+  color: var(--text-bright);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.markdownBubble h1 { font-size: var(--text-xl); }
+.markdownBubble h2 { font-size: var(--text-xl); }
+.markdownBubble h3 { font-size: var(--text-l); }
+.markdownBubble h4,
+.markdownBubble h5,
+.markdownBubble h6 { font-size: var(--text-m); }
+
+.markdownBubble strong,
+.markdownBubble b {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.markdownBubble em,
+.markdownBubble i {
+  font-style: italic;
+}
+
+.markdownBubble ul,
+.markdownBubble ol {
+  margin: 0 0 var(--space-s);
+  padding-left: var(--space-3xl);
+}
+
+.markdownBubble li {
+  margin-bottom: var(--space-4xs);
+}
+
+.markdownBubble li > p {
+  margin: 0;
+}
+
+.markdownBubble a {
+  color: var(--text-bright);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdownBubble a:hover {
+  color: var(--overlay);
+}
+
+.markdownBubble code {
+  padding: var(--space-px) var(--space-2xs);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-3);
+  color: var(--text-bright);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--text-xs);
+}
+
+.markdownBubble pre {
+  margin: 0 0 var(--space-s);
+  padding: var(--space-s) var(--space-m);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-2);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.markdownBubble pre code {
+  padding: 0;
+  background: transparent;
+  font-size: var(--text-xs);
+}
+
+.markdownBubble blockquote {
+  margin: 0 0 var(--space-s);
+  padding: var(--space-4xs) 0 var(--space-4xs) var(--space-m);
+  border-left: 2px solid var(--overlay-10);
+  color: var(--text-muted);
+}
+
+.toolCallsContainer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4xs);
+  width: 90%;
+}
+
+/* ── ToolCallBadge ───────────────────────────────────────────────────────── */
+.toolCallBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-4xs) var(--space-s);
+  border-radius: 20px;
+  background: var(--overlay-5);
+  border: 1px solid var(--overlay-10);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.toolCallIconPending {
+  color: var(--text-disabled);
+}
+
+.toolCallIconSuccess {
+  color: var(--success-bright);
+}
+
+.toolCallIconFailed {
+  color: var(--danger-light);
+}
+
+.toolCallType {
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  opacity: 0.70;
+}
+
+/* Inline error message rendered under a failed tool badge. Lets the user
+   see WHY the tool failed without expanding anything — same width as the
+   badge container, danger-toned text, one-line ellipsis when long. */
+.toolCallError {
+  margin: var(--space-4xs) 0 0 var(--space-l);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--danger-light);
+  word-break: break-word;
+}
+
+
+/* ── Credential setup state ──────────────────────────────────────────────── */
+
+.credentialAlert {
+  display: grid;
+  gap: var(--space-s);
+  padding: var(--space-l);
+  margin: 0 0 var(--space-4xs);
+  background: var(--warning-10);
+  border: 1px solid var(--warning-30);
+  border-radius: var(--radius);
+  color: var(--warning-text);
+}
+
+.credentialAlertText {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.credentialSettingsButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  width: fit-content;
+}
+
+.credentialSettingsButtonHeader {
+  color: var(--text-muted);
+}
+
+.credentialSettingsButtonEmptyState {
+  min-width: 178px;
+  font-size: var(--text-s);
+}
+
+.credentialSettingsButtonInline {
+  color: var(--warning-text);
+}
+
+/* ── Conversation history (inline children only — dropdown chrome comes
+   from the shared ContextMenu primitive) ────────────────────────────── */
+
+.historyItemTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.historyItemMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-inline-start: auto;
+}
+
+.historyItemTime {
+  color: var(--text-disabled);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.historyItemDelete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4xs);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+
+.historyItemDelete:hover {
+  color: var(--danger);
+  background: var(--bg-surface);
+}

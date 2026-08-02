@@ -1,0 +1,91 @@
+/* DomPanel — DOM tree panel (floating overlay, Guideline #356/#357/#318/#321) */
+
+/* ── Panel shell ─────────────────────────────────────────────────────────── */
+.panel {
+    position: absolute;
+    /* Position driven by --panel-x / --panel-y CSS vars (useDraggablePanel) */
+    --panel-x: 16px;
+    --panel-y: 16px;
+    left: var(--panel-x);
+    top: var(--panel-y);
+    z-index: 50;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    backdrop-filter: blur(var(--panel-blur));
+    border: 1px solid var(--overlay-10);
+    border-radius: 12px;
+    box-shadow: var(--shadow-panel);
+    transition: width 150ms ease-in-out;
+    outline: none;
+    will-change: transform;
+    transform: translateZ(0);
+    /* width is set via --panel-w CSS custom property (dynamic resizable state) */
+    width: var(--panel-w);
+}
+
+.panelDocked {
+    position: relative;
+    left: auto;
+    top: auto;
+    z-index: auto;
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+    background: transparent;
+    transition: none;
+    will-change: auto;
+    transform: none;
+}
+
+/* ── Search bar — match the 8px content inset used by every other docked
+ *    panel (see `@admin/shared/Panel/Panel.module.css → .contentPadded`).
+ *    DomPanel can't use the shared shell directly because it owns a custom
+ *    scroll surface (the tree), but the spacing between header → search bar
+ *    must stay aligned with Site / Selectors / Colors / Media etc. */
+.searchBar {
+    margin: var(--space-s) var(--space-s) 0;
+}
+
+/* ── Tree / scrollable content area ─────────────────────────────────────── */
+.treeArea {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* 10px gap below the search bar mirrors the `gap: 10px` on the shared
+     * Panel content area so the visual rhythm matches sibling panels. */
+    padding-top: var(--space-m);
+    padding-bottom: var(--space-xs);
+    padding-right: var(--space-s);
+}
+
+.dragOverlayRow {
+    width: min(240px, var(--panel-w));
+    background: var(--bg-surface);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px var(--scrim-30);
+    pointer-events: none;
+}
+
+.noMatchMsg {
+    padding: var(--space-2xl);
+    color: var(--text-disabled);
+    font-size: var(--text-s);
+}
+
+/* Search-result pill layout only; shared visuals live in TagPill. */
+.searchTagPill {
+    flex-shrink: 0;
+}
+
+.searchClassChip {
+    flex: 0 1 auto;
+    min-width: 0;
+}

@@ -1,0 +1,7 @@
+/* Tab heading — name + variable prefix, two narrow columns. */
+.tabHeading {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-xs);
+}

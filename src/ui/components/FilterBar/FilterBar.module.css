@@ -1,0 +1,54 @@
+.bar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    min-width: 0;
+}
+
+.search {
+    width: 100%;
+}
+
+/* Search row: leading element (e.g. Upload button) + search input side-by-side. */
+.searchRow {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+}
+
+/* Search input when inside a .searchRow — fills the remaining width. */
+.searchFill {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+}
+
+.searchAction {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+}
+
+.row {
+    display: grid;
+    align-items: center;
+    gap: var(--space-xs);
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-width: 0;
+}
+
+.chips {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3xs);
+    min-width: 0;
+    overflow-x: auto;
+    padding-bottom: var(--space-px);
+}
+
+.trailing {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: var(--space-4xs);
+}
